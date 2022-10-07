@@ -1,0 +1,6 @@
+bin
+obj
+*.parquet
+*.parquet.gz
+.idea
+target
