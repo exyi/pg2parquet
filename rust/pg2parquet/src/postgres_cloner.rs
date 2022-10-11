@@ -16,9 +16,14 @@ use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnA
 use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
 use crate::myfrom::MyFrom;
 use crate::parquet_row_writer::{WriterStats, ParquetRowWriter, ParquetRowWriterImpl, WriterSettings};
+use crate::pg_custom_types::PgEnum;
 
 type DynCopier = Box<dyn ColumnCopier<Row>>;
 type ResolvedColumn = (DynCopier, ParquetType);
+
+pub struct SchemaSettings {
+	
+}
 
 
 pub fn execute_copy(query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr) -> Result<WriterStats, String> {
@@ -126,6 +131,9 @@ fn map_schema_column(
 	match t.kind() {
 		Kind::Simple =>
 			map_simple_type(t, name, c),
+		Kind::Enum(_enum_data) =>
+			resolve_primitive::<PgEnum, ByteArrayType>(name, c, Some(LogicalType::Enum), None),
+			// resolve_primitive::<PgEnum, Int32Type>(name, c, None, None),
 		Kind::Array(element_type) => {
 			let mut cc = c.clone();
 			cc.is_array = true;

@@ -3,6 +3,8 @@ use std::ops::Sub;
 use chrono::Datelike;
 use parquet::data_type::{ByteArray, FixedLenByteArray};
 
+use crate::pg_custom_types::PgEnum;
+
 pub trait MyFrom<T> {
 	fn my_from(t: T) -> Self;
 }
@@ -48,6 +50,12 @@ impl MyFrom<String> for ByteArray {
 	}
 }
 
+impl MyFrom<&str> for ByteArray {
+	fn my_from(t: &str) -> Self {
+		ByteArray::from(t)
+	}
+}
+
 impl MyFrom<chrono::DateTime<chrono::Utc>> for i64 {
 	fn my_from(t: chrono::DateTime<chrono::Utc>) -> Self {
 		t.timestamp_micros()
@@ -78,4 +86,16 @@ impl MyFrom<uuid::Uuid> for FixedLenByteArray {
 	fn my_from(t: uuid::Uuid) -> Self {
 		FixedLenByteArray::from(t.as_bytes().to_vec())
 	}
+}
+
+impl<'a> MyFrom<PgEnum> for i32 {
+    fn my_from(t: PgEnum) -> Self {
+		t.case as i32
+    }
+}
+
+impl<'a> MyFrom<PgEnum> for ByteArray {
+    fn my_from(t: PgEnum) -> Self {
+		ByteArray::from(t.name.into_bytes())
+    }
 }

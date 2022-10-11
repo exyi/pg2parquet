@@ -13,6 +13,7 @@ mod column_appender;
 mod column_pg_copier;
 mod parquet_row_writer;
 mod postgres_cloner;
+mod pg_custom_types;
 
 
 #[derive(Parser, Debug, Clone)]
