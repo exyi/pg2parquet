@@ -77,8 +77,8 @@ fn main() {
                 .build();
             let props = Arc::new(props);
     
-
-            let result = postgres_cloner::execute_copy(&args.query.unwrap(), &args.output_file, props);
+            let settings = postgres_cloner::default_settings();
+            let result = postgres_cloner::execute_copy(&args.query.unwrap(), &args.output_file, props, &settings);
             let stats = handle_result(result);
 
             eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);

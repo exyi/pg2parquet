@@ -1,7 +1,8 @@
-use std::ops::Sub;
+use std::{ops::Sub, net::IpAddr};
 
-use chrono::Datelike;
-use parquet::data_type::{ByteArray, FixedLenByteArray};
+use bit_vec::BitVec;
+use chrono::{Datelike, format::Fixed};
+use parquet::data_type::{ByteArray, FixedLenByteArray, Int64Type};
 
 use crate::pg_custom_types::PgEnum;
 
@@ -89,13 +90,46 @@ impl MyFrom<uuid::Uuid> for FixedLenByteArray {
 }
 
 impl<'a> MyFrom<PgEnum> for i32 {
-    fn my_from(t: PgEnum) -> Self {
+	fn my_from(t: PgEnum) -> Self {
 		t.case as i32
-    }
+	}
 }
 
 impl<'a> MyFrom<PgEnum> for ByteArray {
-    fn my_from(t: PgEnum) -> Self {
+	fn my_from(t: PgEnum) -> Self {
 		ByteArray::from(t.name.into_bytes())
-    }
+	}
+}
+
+impl<'a> MyFrom<eui48::MacAddress> for ByteArray {
+	fn my_from(t: eui48::MacAddress) -> Self {
+		let str = t.to_hex_string();
+		ByteArray::from(str.into_bytes())
+	}
+}
+impl<'a> MyFrom<eui48::MacAddress> for FixedLenByteArray {
+	fn my_from(t: eui48::MacAddress) -> Self {
+		let b = t.as_bytes();
+		FixedLenByteArray::from(b.to_vec())
+	}
+}
+impl<'a> MyFrom<eui48::MacAddress> for i64 {
+	fn my_from(t: eui48::MacAddress) -> Self {
+		let mut b = [0u8; 8];
+		b[0..6].copy_from_slice(t.as_bytes());
+		i64::from_be_bytes(b)
+	}
+}
+impl<'a> MyFrom<IpAddr> for ByteArray {
+	fn my_from(t: IpAddr) -> Self {
+		let str = t.to_string();
+		ByteArray::from(str.into_bytes())
+	}
+}
+impl<'a> MyFrom<BitVec> for ByteArray {
+	fn my_from(t: BitVec) -> Self {
+		// this format should be easiest to work with, and parquet should compress it anyway
+		let str = t.iter().map(|b| if b { '1' } else { '0' }).collect::<String>();
+		ByteArray::from(str.into_bytes())
+	}
 }

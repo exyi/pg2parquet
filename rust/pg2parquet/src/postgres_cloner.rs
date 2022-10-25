@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,12 +22,26 @@ use crate::pg_custom_types::PgEnum;
 type DynCopier = Box<dyn ColumnCopier<Row>>;
 type ResolvedColumn = (DynCopier, ParquetType);
 
+#[derive(Clone, Debug)]
 pub struct SchemaSettings {
-	
+	macaddr_handling: SchemaSettingsMacaddrHandling
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SchemaSettingsMacaddrHandling {
+	AsString,
+	AsByteArray,
+	AsInt64
+}
+
+pub fn default_settings() -> SchemaSettings {
+	SchemaSettings {
+		macaddr_handling: SchemaSettingsMacaddrHandling::AsString
+	}
 }
 
 
-pub fn execute_copy(query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr) -> Result<WriterStats, String> {
+pub fn execute_copy(query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
 	let mut pg_config = postgres::Config::new();
 	pg_config.dbname("xx")
 		.host("127.0.0.1")
@@ -38,7 +53,7 @@ pub fn execute_copy(query: &str, output_file: &PathBuf, output_props: WriterProp
 
 	let statement = client.prepare(query).unwrap();
 
-	let (copier, schema) = map_schema_root(statement.columns());
+	let (copier, schema) = map_schema_root(statement.columns(), schema_settings);
 	eprintln!("Schema: {}", format_schema(&schema, 0));
 	let schema = Arc::new(schema);
 
@@ -55,7 +70,6 @@ pub fn execute_copy(query: &str, output_file: &PathBuf, output_props: WriterProp
 		let row = row.map_err(|err| err.to_string())?;
 
 		row_writer.write_row(&row)?;
-
 	}
 
 	Ok(row_writer.close()?)
@@ -103,12 +117,12 @@ fn format_schema(schema: &ParquetType, indent: u32) -> String {
 }
 }
 
-fn map_schema_root(row: &[Column]) -> ResolvedColumn {
+fn map_schema_root(row: &[Column], s: &SchemaSettings) -> ResolvedColumn {
 	let fields: Vec<ResolvedColumn> = row.iter().enumerate().map(|(col_i, c)| {
 
 		let t = c.type_();
 
-		map_schema_column(t, c.name(), &ColumnInfo { col_i, is_array: false, definition_level: 0, repetition_level: 0 })
+		map_schema_column(t, c.name(), &ColumnInfo { col_i, is_array: false, definition_level: 0, repetition_level: 0 }, s)
 	}).collect();
 
 
@@ -126,11 +140,12 @@ fn map_schema_root(row: &[Column]) -> ResolvedColumn {
 fn map_schema_column(
 	t: &PgType,
 	name: &str,
-	c: &ColumnInfo
+	c: &ColumnInfo,
+	s: &SchemaSettings
 ) -> ResolvedColumn {
 	match t.kind() {
 		Kind::Simple =>
-			map_simple_type(t, name, c),
+			map_simple_type(t, name, c, s),
 		Kind::Enum(_enum_data) =>
 			resolve_primitive::<PgEnum, ByteArrayType>(name, c, Some(LogicalType::Enum), None),
 			// resolve_primitive::<PgEnum, Int32Type>(name, c, None, None),
@@ -138,10 +153,10 @@ fn map_schema_column(
 			let mut cc = c.clone();
 			cc.is_array = true;
 			cc.repetition_level += 1;
-			map_schema_column(element_type, name, &cc)
+			map_schema_column(element_type, name, &cc, s)
 		},
 		Kind::Domain(element_type) => {
-			map_schema_column(element_type, name, c)
+			map_schema_column(element_type, name, c, s)
 		},
 		_ => panic!("Unsupported type: {:?}", t),
 	}
@@ -151,7 +166,8 @@ fn map_schema_column(
 fn map_simple_type(
 	t: &PgType,
 	name: &str,
-	c: &ColumnInfo
+	c: &ColumnInfo,
+	s: &SchemaSettings
 ) -> ResolvedColumn {
 
 	match t.name() {
@@ -166,7 +182,7 @@ fn map_simple_type(
 		"money" => todo!(),
 		"char" => resolve_primitive::<i8, Int32Type>(name, c, None, Some(ConvertedType::INT_8)),
 		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType>(name, c, None, None),
-		"name" | "text" | "json" | "xml" | "bpchar" | "varchar" =>
+		"name" | "text" | "json" | "xml" | "bpchar" | "varchar" | "" =>
 			resolve_primitive::<String, ByteArrayType>(name, c, None, Some(ConvertedType::UTF8)),
 		"timestamptz" =>
 			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type>(name, c, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: true, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
@@ -181,9 +197,21 @@ fn map_simple_type(
 			resolve_primitive::<uuid::Uuid, FixedLenByteArrayType>(name, c, Some(LogicalType::Uuid), None),
 
 
-		// "macaddr"
+		"macaddr" =>
+			match s.macaddr_handling {
+				SchemaSettingsMacaddrHandling::AsString =>
+					resolve_primitive::<eui48::MacAddress, ByteArrayType>(name, c, None, Some(ConvertedType::UTF8)),
+				SchemaSettingsMacaddrHandling::AsByteArray =>
+					resolve_primitive::<eui48::MacAddress, FixedLenByteArrayType>(name, c, None, None),
+				SchemaSettingsMacaddrHandling::AsInt64 =>
+					resolve_primitive::<eui48::MacAddress, Int64Type>(name, c, None, None),
+			},
+		"inet" =>
+			resolve_primitive::<IpAddr, ByteArrayType>(name, c, None, Some(ConvertedType::UTF8)),
+		"bit" | "varbit" =>
+			resolve_primitive::<bit_vec::BitVec, ByteArrayType>(name, c, None, Some(ConvertedType::UTF8)),
 
-		// TODO: Regproc Oid Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Float4 Float8 Unknown Circle Macaddr8 Money Macaddr Inet Aclitem Bpchar Interval Timetz Bit Varbit Numeric Refcursor Regprocedure Regoper Regoperator Regclass Regtype Uuid TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonb Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
+		// TODO: Regproc Oid Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Float4 Float8 Unknown Circle Macaddr8 Money Aclitem Bpchar Interval Timetz Numeric Refcursor Regprocedure Regoper Regoperator Regclass Regtype Uuid TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonb Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
 
 
 		n => panic!("Unsupported primitive type: {}", n),

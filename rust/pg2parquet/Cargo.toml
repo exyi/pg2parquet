@@ -12,6 +12,7 @@ clap = { version = "4.0.10", features = ["derive"] }
 uuid = "1.2.1"
 chrono = "0.4.22"
 eui48 = "1.1.0"
+bit-vec = "0.6.3"
 
 
 [profile.release]
