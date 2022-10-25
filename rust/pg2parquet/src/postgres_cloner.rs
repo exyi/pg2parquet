@@ -218,7 +218,7 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType>(
 	where TDataType: DataType, TDataType::T: RealMemorySize + MyFrom<T> {
 	let basic_appender: GenericColumnAppender<T, TDataType, _> = GenericColumnAppender::new(c.definition_level, c.repetition_level, |x| TDataType::T::my_from(x));
 	if c.is_array {
-		Box::new(BasicPgColumnCopier::<Vec<T>, _>::new(c.col_i, ArrayColumnAppender::new(basic_appender)))
+		Box::new(BasicPgColumnCopier::<Vec<Option<T>>, _>::new(c.col_i, ArrayColumnAppender::new(basic_appender)))
 	} else {
 		Box::new(BasicPgColumnCopier::new(c.col_i, basic_appender))
 	}

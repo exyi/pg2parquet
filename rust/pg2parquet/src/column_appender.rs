@@ -153,7 +153,7 @@ impl<TPg, TInner> ArrayColumnAppender<TPg, TInner>
 
 impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg>,
-		  TArray: IntoIterator<Item = TPg> {
+		  TArray: IntoIterator<Item = Option<TPg>> {
 
 	fn copy_value(&mut self, repetition_index: &LevelIndexList, array: TArray) -> Result<usize, String> {
 		let mut bytes_written = 0;
@@ -161,14 +161,17 @@ impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg
 		let mut nested_ri = repetition_index.new_child();
 
 		for (_index, value) in array.into_iter().enumerate() {
-			bytes_written += self.inner.copy_value(&nested_ri, value)?;
+			bytes_written += match value {
+				Some(value) => self.inner.copy_value(&nested_ri, value)?,
+				None => self.inner.write_null(&nested_ri, self.inner.max_dl() - 1)?,
+			};
 
 			nested_ri.inc();
 		}
 
 		// at least one element has to be there
 		if nested_ri.index == 0 {
-			bytes_written += self.inner.write_null(&nested_ri, 0)?;
+			bytes_written += self.inner.write_null(&nested_ri, self.inner.max_dl() - 1)?;
 		}
 		Ok(bytes_written)
 	}
