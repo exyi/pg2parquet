@@ -1,11 +1,13 @@
 use std::marker::PhantomData;
 use std::mem::size_of;
+use std::sync::Arc;
 
 use parquet::data_type::{DataType, AsBytes, SliceAsBytes};
 use parquet::{errors::ParquetError, file::writer::SerializedColumnWriter};
 use parquet::column::writer::{GenericColumnWriter, Level};
 use postgres::types::FromSql;
 
+use crate::column_pg_copier::DynamicSerializedWriter;
 use crate::level_index::*;
 use crate::myfrom::MyFrom;
 
@@ -14,11 +16,17 @@ pub fn generic_column_appender_new_myfrom<TPg, TPq>(max_dl: i16, max_rl: i16) ->
 	GenericColumnAppender::new(max_dl, max_rl, |x| TPq::T::my_from(x))
 }
 
-pub trait ColumnAppender<TPg> {
+pub trait ColumnAppender<TPg>: Clone {
 	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: TPg) -> Result<usize, String>;
+	fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Option<TPg>) -> Result<usize, String> {
+		match value {
+			Some(value) => self.copy_value(repetition_index, value),
+			None => self.write_null(repetition_index, self.max_dl() - 1),
+		}
+	}
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String>;
 
-	fn write_column(&mut self, writer: &mut SerializedColumnWriter) -> Result<(), ParquetError>;
+	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String>;
 
 	fn max_dl(&self) -> i16;
 	fn max_rl(&self) -> i16;
@@ -34,7 +42,7 @@ pub struct GenericColumnAppender<TPg, TPq, FConversion>
 	dummy: PhantomData<TPg>,
 	dummy2: PhantomData<TPq>,
 	repetition_index: LevelIndexState,
-	conversion: FConversion,
+	conversion: Arc<FConversion>,
 }
 
 impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
@@ -49,7 +57,7 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 			dls: Vec::new(),
 			rls: Vec::new(),
 			repetition_index: LevelIndexState::new(max_rl),
-			conversion,
+			conversion: Arc::new(conversion),
 		}
 	}
 
@@ -59,6 +67,39 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 
 	pub fn convert(&self, value: TPg) -> TPq::T {
 		(self.conversion)(value)
+	}
+
+	fn write_column(&mut self, writer: &mut SerializedColumnWriter) -> Result<(), ParquetError> {
+		let dls = if self.max_dl > 0 { Some(self.dls.as_slice()) } else { None };
+		let rls = if self.max_rl > 0 { Some(self.rls.as_slice()) } else { None };
+
+		// if self.max_rl > 0 {
+		// 	println!("Writing values: {:?}", self.column);
+		// 	println!("           RLS: {:?}", self.rls);
+		// 	println!("           DLS: {:?}", self.dls);
+		// }
+		
+		let typed = writer.typed::<TPq>();
+		let _num_written = typed.write_batch(&self.column, dls, rls)?;
+
+		Ok(())
+	}
+}
+
+impl<TPg, TPq, FConversion> Clone for GenericColumnAppender<TPg, TPq, FConversion>
+	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
+	fn clone(&self) -> Self {
+		GenericColumnAppender {
+			max_dl: self.max_dl,
+			max_rl: self.max_rl,
+			column: self.column.clone(),
+			dummy: PhantomData,
+			dummy2: PhantomData,
+			dls: self.dls.clone(),
+			rls: self.rls.clone(),
+			repetition_index: self.repetition_index.clone(),
+			conversion: self.conversion.clone(),
+		}
 	}
 }
 
@@ -90,21 +131,28 @@ impl<TPg, TPq, FConversion> ColumnAppender<TPg> for GenericColumnAppender<TPg, T
 		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
 	}
 
-	fn write_column(&mut self, writer: &mut SerializedColumnWriter) -> Result<(), ParquetError> {
-		let dls = if self.max_dl > 0 { Some(self.dls.as_slice()) } else { None };
-		let rls = if self.max_rl > 0 { Some(self.rls.as_slice()) } else { None };
+	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
+		let mut error = None;
+		let c = next_col.next_column(&mut |mut column| {
+			let result = self.write_column(&mut column);
+			error = result.err();
+			let result2 = column.close();
 
-		if self.max_rl > 0 {
-			println!("Writing values: {:?}", self.column);
-			println!("           RLS: {:?}", self.rls);
-			println!("           DLS: {:?}", self.dls);
+			error = error.clone().or(result2.err());
+			
+		}).map_err(|e| format!("Could not create column[{}]: {}", column_i, e))?;
+
+		if error.is_some() {
+			return Err(format!("Couldn't write data of column[{}]: {}", column_i, error.unwrap()));
 		}
-		
-		let typed = writer.typed::<TPq>();
-		let _num_written = typed.write_batch(&self.column, dls, rls)?;
+
+		if !c {
+			return Err("Not enough columns".to_string());
+		}
 
 		Ok(())
 	}
+
 
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		debug_assert!(level < self.max_dl);
@@ -143,6 +191,13 @@ impl<TPg, TInner> ArrayColumnAppender<TPg, TInner>
 	// fn max_dl(&self) -> i16 { self.inner.max_dl() }
 }
 
+impl<TPg, TInner> Clone for ArrayColumnAppender<TPg, TInner>
+	where TInner: ColumnAppender<TPg> {
+	fn clone(&self) -> Self {
+		ArrayColumnAppender { inner: self.inner.clone(), dummy: PhantomData }
+	}
+}
+
 // impl<TPg, TPq, FConversion> ArrayColumnAppender<TPg, GenericColumnAppender<TPg, TPq, TDataType>>
 // 	where TPq: Default + From<TPg> + RealMemorySize, TDataType: DataType<T = TPq> {
 // 	fn new_generic(max_dl: i16, max_rl: i16) -> Self
@@ -161,10 +216,7 @@ impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg
 		let mut nested_ri = repetition_index.new_child();
 
 		for (_index, value) in array.into_iter().enumerate() {
-			bytes_written += match value {
-				Some(value) => self.inner.copy_value(&nested_ri, value)?,
-				None => self.inner.write_null(&nested_ri, self.inner.max_dl() - 1)?,
-			};
+			bytes_written += self.inner.copy_value_opt(repetition_index, value)?;
 
 			nested_ri.inc();
 		}
@@ -189,15 +241,13 @@ impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg
 		}
 	}
 
-	fn write_column(&mut self, writer: &mut SerializedColumnWriter) -> Result<(), ParquetError> {
-		self.inner.write_column(writer)
-	}
-
 	fn max_dl(&self) -> i16 { self.inner.max_dl() }
 	fn max_rl(&self) -> i16 { self.inner.max_rl() - 1 }
+
+	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
+		self.inner.write_columns(column_i, next_col)
+	}
 }
-
-
 
 pub trait RealMemorySize {
 	fn real_memory_size(&self) -> usize;

@@ -3,7 +3,7 @@ use std::{marker::PhantomData, fs::File, io::Write, cell::RefCell, sync::Arc};
 use parquet::{file::writer::{SerializedColumnWriter, SerializedRowGroupWriter}, errors::ParquetError};
 use postgres::types::FromSql;
 
-use crate::{column_appender::*, level_index::*};
+use crate::{column_appender::*, level_index::*, pg_custom_types::PgAbstractRow};
 
 pub type Arcell<T> = Arc<RefCell<T>>;
 
@@ -69,18 +69,15 @@ impl<TPg, TAppender> BasicPgColumnCopier<TPg, TAppender>
 	}
 }
 
-impl<TPg, TAppender> ColumnCopier<postgres::Row> for BasicPgColumnCopier<TPg, TAppender>
+impl<TPg, TAppender, TRow: PgAbstractRow> ColumnCopier<TRow> for BasicPgColumnCopier<TPg, TAppender>
 	where TPg: for<'a> FromSql<'a>, TAppender: ColumnAppender<TPg> {
 
-	fn copy_value<'a>(&mut self, repetition_index: &LevelIndexList, reader: &'a postgres::Row) -> Result<usize, String> {
+	fn copy_value<'a>(&mut self, repetition_index: &LevelIndexList, reader: &'a TRow) -> Result<usize, String> {
 		debug_assert_eq!(repetition_index.level, self.column.max_rl());
 
-		let v = reader.get::<usize, Option<TPg>>(self.column_i);
+		let v = reader.ab_get::<Option<TPg>>(self.column_i);
 
-		match v {
-			None => self.column.write_null(repetition_index, self.column.max_dl() - 1),
-			Some(v) => self.column.copy_value(repetition_index, v),
-		}
+		self.column.copy_value_opt(repetition_index, v)
 	}
 
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
@@ -89,35 +86,19 @@ impl<TPg, TAppender> ColumnCopier<postgres::Row> for BasicPgColumnCopier<TPg, TA
 	}
 
 	fn write_columns<'b>(&mut self, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		let mut error = None;
-		let c = next_col.next_column(&mut |mut column| {
-			let result = self.column.write_column(&mut column);
-			error = result.err();
-			let result2 = column.close();
-
-			error = error.clone().or(result2.err());
-			
-		}).map_err(|e| format!("Could not create column[{}]: {}", self.column_i, e))?;
-
-		if error.is_some() {
-			return Err(format!("Couldn't write data of column[{}]: {}", self.column_i, error.unwrap()));
-		}
-
-		if !c {
-			return Err("Not enough columns".to_string());
-		}
-
-		Ok(())
+		self.column.write_columns(self.column_i, next_col)
 	}
 }
 
 pub struct MergedColumnCopier<TReader> {
-	columns: Vec<Box<dyn ColumnCopier<TReader>>>
+	columns: Vec<Box<dyn ColumnCopier<TReader>>>,
+	max_dl: i16,
+	max_rl: i16
 }
 
 impl<'a, TReader> MergedColumnCopier<TReader> {
-	pub fn new(columns: Vec<Box<dyn ColumnCopier<TReader>>>) -> Self {
-		MergedColumnCopier { columns }
+	pub fn new(columns: Vec<Box<dyn ColumnCopier<TReader>>>, max_dl: i16, max_rl: i16) -> Self {
+		MergedColumnCopier { columns, max_dl, max_rl }
 	}
 }
 
@@ -147,4 +128,29 @@ impl<'a, TReader> ColumnCopier<TReader> for MergedColumnCopier<TReader> {
 	}
 }
 
+impl<TReader> Clone for MergedColumnCopier<TReader> {
+	fn clone(&self) -> Self {
+		todo!();
+		// MergedColumnCopier {
+		// 	columns: self.columns.iter().map(|c| c.clone()).collect()
+		// }
+	}
+}
 
+impl<TReader> ColumnAppender<TReader> for MergedColumnCopier<TReader> {
+	fn write_columns(&mut self, _column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
+		ColumnCopier::write_columns(self, next_col)
+	}
+
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: TReader) -> Result<usize, String> {
+		ColumnCopier::copy_value(self, repetition_index, &value)
+    }
+
+	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		ColumnCopier::write_null(self, repetition_index, level)
+    }
+
+	fn max_dl(&self) -> i16 { self.max_dl }
+
+	fn max_rl(&self) -> i16 { self.max_rl }
+}

@@ -14,6 +14,7 @@ mod column_pg_copier;
 mod parquet_row_writer;
 mod postgres_cloner;
 mod pg_custom_types;
+mod range_col_appender;
 
 
 #[derive(Parser, Debug, Clone)]
