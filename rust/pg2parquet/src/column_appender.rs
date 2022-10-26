@@ -216,7 +216,7 @@ impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg
 		let mut nested_ri = repetition_index.new_child();
 
 		for (_index, value) in array.into_iter().enumerate() {
-			bytes_written += self.inner.copy_value_opt(repetition_index, value)?;
+			bytes_written += self.inner.copy_value_opt(&nested_ri, value)?;
 
 			nested_ri.inc();
 		}
@@ -231,13 +231,11 @@ impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		debug_assert!(level < self.inner.max_dl());
 
+		let nested_ri = repetition_index.new_child();
 		if level == self.inner.max_dl() - 1 {
-
-			let nested_ri = repetition_index.new_child();
-
 			self.inner.write_null(&nested_ri, level)
 		} else {
-			self.inner.write_null(repetition_index, level)
+			self.inner.write_null(&nested_ri, level)
 		}
 	}
 

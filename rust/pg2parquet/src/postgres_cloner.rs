@@ -175,8 +175,10 @@ fn map_schema_column<TRow: PgAbstractRow>(
 		},
 		&Kind::Range(ref element_type) => {
 			let mut cc = c.clone();
+			cc.is_array = false;
 			cc.col_i = 0;
 			cc.definition_level += 1;
+			// cc.repetition_level += c.is_array as i16;
 			let col_lower = map_schema_column(element_type, "lower", &cc, s);
 			cc.col_i += 1;
 			let col_upper = map_schema_column(element_type, "upper", &cc, s);
@@ -195,7 +197,7 @@ fn map_schema_column<TRow: PgAbstractRow>(
 					Arc::new(ParquetType::primitive_type_builder("upper_inclusive", basic::Type::BOOLEAN).build().unwrap()),
 					Arc::new(ParquetType::primitive_type_builder("is_empty", basic::Type::BOOLEAN).build().unwrap()),
 				])
-				.with_repetition(Repetition::OPTIONAL)
+				.with_repetition(if c.is_array { Repetition::REPEATED } else { Repetition::OPTIONAL })
 				.build()
 				.unwrap();
 
@@ -317,7 +319,7 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType, FConv
 }
 
 fn create_complex_appender<T: for <'a> FromSql<'a> + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, copiers: Vec<DynCopier<T>>) -> Callback::TResult {
-	let main_cp = MergedColumnCopier::new(copiers, c.definition_level, c.repetition_level);
+	let main_cp = MergedColumnCopier::new(copiers, c.definition_level + 1, c.repetition_level);
 	if c.is_array {
 		callback.f::<Vec<Option<T>>, _>(c, ArrayColumnAppender::new(main_cp))
 	} else {

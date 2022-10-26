@@ -81,6 +81,7 @@ impl<TPg, TAppender, TRow: PgAbstractRow> ColumnCopier<TRow> for BasicPgColumnCo
 	}
 
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		// println!("write_null: level: {}, max_rl: {}", level, self.column.max_rl());
 		debug_assert_eq!(repetition_index.level, self.column.max_rl());
 		self.column.write_null(repetition_index, level)
 	}
