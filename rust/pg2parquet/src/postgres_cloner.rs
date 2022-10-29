@@ -17,6 +17,7 @@ use parquet::schema::types::{Type as ParquetType, TypePtr};
 
 use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize};
 use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
+use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::new_decimal_bytes_appender;
 use crate::myfrom::{MyFrom, self};
@@ -30,6 +31,7 @@ type ResolvedColumn<TRow> = (DynCopier<TRow>, ParquetType);
 #[derive(Clone, Debug)]
 pub struct SchemaSettings {
 	macaddr_handling: SchemaSettingsMacaddrHandling,
+	json_handling: SchemaSettingsJsonHandling,
 	decimal_scale: i32,
 	decimal_precision: u32,
 }
@@ -41,9 +43,16 @@ pub enum SchemaSettingsMacaddrHandling {
 	AsInt64
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum SchemaSettingsJsonHandling {
+	StringMarkedAsJson,
+	String
+}
+
 pub fn default_settings() -> SchemaSettings {
 	SchemaSettings {
 		macaddr_handling: SchemaSettingsMacaddrHandling::AsString,
+		json_handling: SchemaSettingsJsonHandling::String, // DuckDB doesn't load JSON converted type, so better to use string I guess
 		decimal_scale: 18,
 		decimal_precision: 38,
 	}
@@ -257,8 +266,18 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, callback, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, callback, None, Some(ConvertedType::INT_8)),
 		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, callback, None, None),
-		"name" | "text" | "json" | "xml" | "bpchar" | "varchar" =>
+		"name" | "text" | "xml" | "bpchar" | "varchar" =>
 			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
+		"json" =>
+			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(match s.json_handling {
+				SchemaSettingsJsonHandling::String => ConvertedType::UTF8,
+				SchemaSettingsJsonHandling::StringMarkedAsJson => ConvertedType::JSON
+			})),
+		"jsonb" =>
+			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, callback, None, Some(match s.json_handling {
+				SchemaSettingsJsonHandling::String => ConvertedType::UTF8,
+				SchemaSettingsJsonHandling::StringMarkedAsJson => ConvertedType::JSON
+			})),
 		"timestamptz" =>
 			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, callback, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: true, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
 		"timestamp" =>
@@ -286,7 +305,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"bit" | "varbit" =>
 			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
 
-		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Money Aclitem Bpchar Interval Timetz Numeric Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonb Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
+		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Aclitem Bpchar Interval Timetz Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
 
 
 		n => 
