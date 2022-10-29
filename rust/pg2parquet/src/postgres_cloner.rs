@@ -17,10 +17,10 @@ use parquet::schema::types::{Type as ParquetType, TypePtr};
 
 use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize};
 use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
-use crate::myfrom::MyFrom;
+use crate::datatypes::numeric::new_decimal_bytes_appender;
+use crate::myfrom::{MyFrom, self};
 use crate::parquet_row_writer::{WriterStats, ParquetRowWriter, ParquetRowWriterImpl, WriterSettings};
 use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord};
-use crate::range_col_appender::RangeColumnAppender;
 
 type DynCopier<TRow> = Box<dyn ColumnCopier<TRow>>;
 type DynRowCopier = DynCopier<Row>;
@@ -28,7 +28,9 @@ type ResolvedColumn<TRow> = (DynCopier<TRow>, ParquetType);
 
 #[derive(Clone, Debug)]
 pub struct SchemaSettings {
-	macaddr_handling: SchemaSettingsMacaddrHandling
+	macaddr_handling: SchemaSettingsMacaddrHandling,
+	decimal_scale: i32,
+	decimal_precision: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -40,7 +42,9 @@ pub enum SchemaSettingsMacaddrHandling {
 
 pub fn default_settings() -> SchemaSettings {
 	SchemaSettings {
-		macaddr_handling: SchemaSettingsMacaddrHandling::AsString
+		macaddr_handling: SchemaSettingsMacaddrHandling::AsString,
+		decimal_scale: 18,
+		decimal_precision: 38,
 	}
 }
 
@@ -237,7 +241,18 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"int8" => resolve_primitive::<i64, Int64Type, _>(name, c, callback, None, None),
 		"float4" => resolve_primitive::<f32, FloatType, _>(name, c, callback, None, None),
 		"float8" => resolve_primitive::<f64, DoubleType, _>(name, c, callback, None, None),
-		"numeric" => todo!(),
+		"numeric" => {
+			let scale = s.decimal_scale;
+			let precision = s.decimal_precision;
+			let schema = ParquetType::primitive_type_builder(name, basic::Type::BYTE_ARRAY)
+				.with_repetition(c.pq_repetition())
+				.with_logical_type(Some(LogicalType::Decimal { scale, precision: precision as i32 }))
+				.with_precision(precision as i32)
+				.with_scale(scale)
+				.build().unwrap();
+			let cp = wrap_appender(c, callback, new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale));
+			(cp, schema)
+		},
 		"money" => todo!(),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, callback, None, Some(ConvertedType::INT_8)),
 		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, callback, None, None),
@@ -286,6 +301,19 @@ fn resolve_primitive<T: for<'a> FromSql<'a> + 'static, TDataType, Callback: Appe
 	conv_type: Option<ConvertedType>
 ) -> (Callback::TResult, ParquetType)
 	where TDataType: DataType, TDataType::T : RealMemorySize + MyFrom<T> {
+	resolve_primitive_conv::<T, TDataType, _, Callback>(name, c, callback, logical_type, conv_type, |v| MyFrom::my_from(v))
+}
+
+
+fn resolve_primitive_conv<T: for<'a> FromSql<'a> + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, Callback: AppenderCallback>(
+	name: &str,
+	c: &ColumnInfo,
+	callback: Callback,
+	logical_type: Option<LogicalType>,
+	conv_type: Option<ConvertedType>,
+	convert: FConversion
+) -> (Callback::TResult, ParquetType)
+	where TDataType: DataType, TDataType::T : RealMemorySize {
 	let mut c = c.clone();
 	c.definition_level += 1; // TODO: can we support NOT NULL fields?
 	let t =
@@ -296,11 +324,10 @@ fn resolve_primitive<T: for<'a> FromSql<'a> + 'static, TDataType, Callback: Appe
 		.build().unwrap();
 
 	let cp =
-		create_primitive_appender::<T, TDataType, _, _>(&c, callback, |x| TDataType::T::my_from(x));
+		create_primitive_appender::<T, TDataType, _, _>(&c, callback, convert);
 
 	(cp, t)
 }
-
 fn create_primitive_copier_simple<T: for <'a> FromSql<'a> + 'static, TDataType, TRow: PgAbstractRow>(
 	c: &ColumnInfo,
 ) -> DynCopier<TRow>
@@ -315,21 +342,21 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType, FConv
 	callback: Callback,
 	convert: FConversion
 ) -> Callback::TResult
-	where TDataType: DataType, TDataType::T: RealMemorySize + MyFrom<T> {
+	where TDataType: DataType, TDataType::T: RealMemorySize {
 	let basic_appender: GenericColumnAppender<T, TDataType, _> = GenericColumnAppender::new(c.definition_level, c.repetition_level, convert);
-	if c.is_array {
-		callback.f::<Vec<Option<T>>, _>(c, ArrayColumnAppender::new(basic_appender))
-	} else {
-		callback.f(c, basic_appender)
-	}
+	wrap_appender(c, callback, basic_appender)
 }
 
 fn create_complex_appender<T: for <'a> FromSql<'a> + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, copiers: Vec<DynCopier<T>>) -> Callback::TResult {
 	let main_cp = MergedColumnCopier::new(copiers, c.definition_level + 1, c.repetition_level);
+	wrap_appender(c, callback, main_cp)
+}
+
+fn wrap_appender<T: for <'a> FromSql<'a> + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, appender: impl ColumnAppender<T> + 'static) -> Callback::TResult {
 	if c.is_array {
-		callback.f::<Vec<Option<T>>, _>(c, ArrayColumnAppender::new(main_cp))
+		callback.f::<Vec<Option<T>>, _>(c, ArrayColumnAppender::new(appender))
 	} else {
-		callback.f(c, main_cp)
+		callback.f(c, appender)
 	}
 }
 

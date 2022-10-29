@@ -14,7 +14,7 @@ mod column_pg_copier;
 mod parquet_row_writer;
 mod postgres_cloner;
 mod pg_custom_types;
-mod range_col_appender;
+mod datatypes;
 
 
 #[derive(Parser, Debug, Clone)]
@@ -52,6 +52,7 @@ fn handle_result<T, TErr: ToString>(r: Result<T, TErr>) -> T {
         Err(e) => {
             let args = CliCommand::try_parse();
             eprintln!("Error occured while executing command {:?}", args.ok());
+            eprintln!();
             eprintln!("{}", e.to_string());
             std::process::exit(1);
         }
@@ -71,7 +72,7 @@ fn main() {
             playground::create_something(&args.parquet_file);
         },
         CliCommand::Export(args) => {
-            eprintln!("query: {:?}", args.query);
+            // eprintln!("query: {:?}", args.query);
             let props =
                 parquet::file::properties::WriterProperties::builder()
                     .set_compression(parquet::basic::Compression::SNAPPY)

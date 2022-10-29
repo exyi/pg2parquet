@@ -3,6 +3,7 @@ use std::{ops::Sub, net::IpAddr};
 use bit_vec::BitVec;
 use chrono::{Datelike, format::Fixed};
 use parquet::data_type::{ByteArray, FixedLenByteArray, Int64Type};
+use pg_bigdecimal::{PgNumeric, BigDecimal};
 
 use crate::pg_custom_types::PgEnum;
 
