@@ -57,7 +57,7 @@ pub fn execute_copy(query: &str, output_file: &PathBuf, output_props: WriterProp
 
 	let statement = client.prepare(query).map_err(|db_err| { db_err.to_string() })?;
 
-	let (copier, schema) = map_schema_root(statement.columns(), schema_settings);
+	let (copier, schema) = map_schema_root(statement.columns(), schema_settings)?;
 	eprintln!("Schema: {}", format_schema(&schema, 0));
 	let schema = Arc::new(schema);
 
@@ -129,16 +129,15 @@ fn count_columns(p: &ParquetType) -> usize {
 }
 
 
-fn map_schema_root(row: &[Column], s: &SchemaSettings) -> ResolvedColumn<Row> {
-	let mut col_i = 0;
-	let fields: Vec<ResolvedColumn<Row>> = row.iter().map(|c| {
+fn map_schema_root(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<Row>, String> {
+	let mut fields: Vec<ResolvedColumn<Row>> = vec![];
+	for (col_i, c) in row.iter().enumerate() {
 
 		let t = c.type_();
 
-		let schema = map_schema_column(t, c.name(), &ColumnInfo { col_i, is_array: false, definition_level: 0, repetition_level: 0 }, s);
-		col_i += 1; //count_columns(&schema.1);
-		schema
-	}).collect();
+		let schema = map_schema_column(t, &ColumnInfo::root(col_i, c.name().to_owned()), s)?;
+		fields.push(schema)
+	}
 
 
 	let (column_copiers, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
@@ -149,36 +148,35 @@ fn map_schema_root(row: &[Column], s: &SchemaSettings) -> ResolvedColumn<Row> {
 		.build()
 		.unwrap();
 
-	(merged_copier, struct_type)
+	Ok((merged_copier, struct_type))
 }
 
 fn map_schema_column<TRow: PgAbstractRow>(
 	t: &PgType,
-	name: &str,
 	c: &ColumnInfo,
 	s: &SchemaSettings
-) -> ResolvedColumn<TRow> {
+) -> Result<ResolvedColumn<TRow>, String> {
 	match t.kind() {
 		Kind::Simple =>
-			map_simple_type(t, name, c, s, CreateCopierCallback::new()),
+			map_simple_type(t, c, s, CreateCopierCallback::new()),
 		Kind::Enum(ref _enum_data) =>
-			resolve_primitive::<PgEnum, ByteArrayType, _>(name, c, CreateCopierCallback::new(), Some(LogicalType::Enum), None),
+			Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, CreateCopierCallback::new(), Some(LogicalType::Enum), None)),
 			// resolve_primitive::<PgEnum, Int32Type>(name, c, None, None),
 		Kind::Array(ref element_type) => {
-			map_schema_column(element_type, name, &c.as_array(), s)
+			map_schema_column(element_type, &c.as_array(), s)
 		},
 		Kind::Domain(ref element_type) => {
-			map_schema_column(element_type, name, c, s)
+			map_schema_column(element_type, c, s)
 		},
 		&Kind::Range(ref element_type) => {
 			// cc.repetition_level += c.is_array as i16;
-			let col_lower = map_schema_column(element_type, "lower", &c.nest(0), s);
-			let col_upper = map_schema_column(element_type, "upper", &c.nest(1), s);
-			let col_lower_incl = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest(2));
-			let col_upper_incl = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest(3));
-			let col_is_empty = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest(4));
+			let col_lower = map_schema_column(element_type, &c.nest("lower", 0), s)?;
+			let col_upper = map_schema_column(element_type, &c.nest("upper", 1), s)?;
+			let col_lower_incl = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest("lower_inclusive", 2));
+			let col_upper_incl = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest("upper_inclusive", 3));
+			let col_is_empty = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest("is_empty", 4));
 
-			let schema = ParquetType::group_type_builder(name)
+			let schema = ParquetType::group_type_builder(c.col_name())
 				.with_fields(&mut vec![
 					Arc::new(col_lower.1),
 					Arc::new(col_upper.1),
@@ -198,20 +196,17 @@ fn map_schema_column<TRow: PgAbstractRow>(
 				col_is_empty,
 			]);
 
-			(copier, schema)
+			Ok((copier, schema))
 		},
 		&Kind::Composite(ref fields) => {
-			let fields: Vec<_> = fields.iter().enumerate().map(|(i, f)| {
-				let mut cc = c.clone();
-				cc.is_array = false;
-				cc.col_i = i;
-				cc.definition_level += 1;
-				map_schema_column::<PgRawRecord>(f.type_(), f.name(), &cc, s)
-			}).collect();
+			let (mut column_copiers, mut parquet_types) = (vec![], vec![]);
+			for (i, f) in fields.into_iter().enumerate() {
+				let (c, t) = map_schema_column::<PgRawRecord>(f.type_(), &c.nest(f.name(), i), s)?;
+				column_copiers.push(c);
+				parquet_types.push(t);
+			}
 
-			let (column_copiers, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
-
-			let schema = ParquetType::group_type_builder(name)
+			let schema = ParquetType::group_type_builder(c.col_name())
 				.with_fields(&mut parquet_types.into_iter().map(Arc::new).collect())
 				.with_repetition(c.pq_repetition())
 				.build()
@@ -219,22 +214,22 @@ fn map_schema_column<TRow: PgAbstractRow>(
 
 			let copier = create_complex_appender::<PgRawRecord, _>(c, CreateCopierCallback::<TRow>::new(), column_copiers);
 
-			(copier, schema)
+			Ok((copier, schema))
 		}
-		_ => panic!("Unsupported type: {:?}", t),
+		_ => Err(format!("Could not map column {}, unsupported type: {}", c.full_name(), t))
 	}
 }
 
 
 fn map_simple_type<Callback: AppenderCallback>(
 	t: &PgType,
-	name: &str,
 	c: &ColumnInfo,
 	s: &SchemaSettings,
 	callback: Callback,
-) -> (Callback::TResult, ParquetType) {
+) -> Result<(Callback::TResult, ParquetType), String> {
+	let name = c.col_name();
 
-	match t.name() {
+	Ok(match t.name() {
 		"bool" => resolve_primitive::<bool, BoolType, _>(name, c, callback, None, None),
 		"int2" => resolve_primitive::<i16, Int32Type, _>(name, c, callback, None, Some(ConvertedType::INT_16)),
 		"int4" => resolve_primitive::<i32, Int32Type, _>(name, c, callback, None, None),
@@ -275,11 +270,12 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"bit" | "varbit" =>
 			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
 
-		// TODO: Regproc Oid Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Money Aclitem Bpchar Interval Timetz Numeric Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonb Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
+		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Money Aclitem Bpchar Interval Timetz Numeric Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonb Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
 
 
-		n => panic!("Unsupported primitive type: {}", n),
-	}
+		n => 
+			return Err(format!("Could not map column {}, unsupported primitive type: {}", c.full_name(), n)),
+	})
 }
 
 fn resolve_primitive<T: for<'a> FromSql<'a> + 'static, TDataType, Callback: AppenderCallback>(
@@ -339,12 +335,22 @@ fn create_complex_appender<T: for <'a> FromSql<'a> + 'static, Callback: Appender
 
 #[derive(Debug, Clone)]
 struct ColumnInfo {
+	pub names: Arc<Vec<String>>,
 	pub col_i: usize,
 	pub is_array: bool,
 	pub definition_level: i16,
 	pub repetition_level: i16,
 }
 impl ColumnInfo {
+	pub fn root(col_i: usize, name: String) -> ColumnInfo {
+		ColumnInfo {
+			names: Arc::new(vec![name]),
+			col_i,
+			is_array: false,
+			definition_level: 0,
+			repetition_level: 0,
+		}
+	}
 	fn pq_repetition(&self) -> Repetition {
 		if self.is_array {
 			Repetition::REPEATED
@@ -353,8 +359,13 @@ impl ColumnInfo {
 		}
 	}
 
-	fn nest(&self, col_i: usize) -> ColumnInfo {
+	fn nest<TString: Into<String>>(&self, name: TString, col_i: usize) -> ColumnInfo {
 		ColumnInfo {
+			names: Arc::new({
+				let mut v = (*self.names).clone();
+				v.push(name.into());
+				v
+			}),
 			col_i,
 			is_array: false,
 			definition_level: self.definition_level + 1,
@@ -365,11 +376,20 @@ impl ColumnInfo {
 	fn as_array(&self) -> ColumnInfo {
 		assert!(self.is_array == false, "Parquet does not support nested arrays");
 		ColumnInfo {
+			names: self.names.clone(),
 			col_i: self.col_i,
 			is_array: true,
 			definition_level: self.definition_level,
 			repetition_level: self.repetition_level + 1,
 		}
+	}
+
+	fn col_name(&self) -> &str {
+		&self.names[self.names.len() - 1]
+	}
+
+	fn full_name(&self) -> String {
+		self.names.join("/")
 	}
 }
 
