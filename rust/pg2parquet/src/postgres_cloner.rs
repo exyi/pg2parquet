@@ -17,6 +17,7 @@ use parquet::schema::types::{Type as ParquetType, TypePtr};
 
 use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize};
 use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
+use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::new_decimal_bytes_appender;
 use crate::myfrom::{MyFrom, self};
 use crate::parquet_row_writer::{WriterStats, ParquetRowWriter, ParquetRowWriterImpl, WriterSettings};
@@ -253,7 +254,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 			let cp = wrap_appender(c, callback, new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale));
 			(cp, schema)
 		},
-		"money" => todo!(),
+		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, callback, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, callback, None, Some(ConvertedType::INT_8)),
 		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, callback, None, None),
 		"name" | "text" | "json" | "xml" | "bpchar" | "varchar" =>
@@ -316,12 +317,19 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + 'static, TDataType, FConversi
 	where TDataType: DataType, TDataType::T : RealMemorySize {
 	let mut c = c.clone();
 	c.definition_level += 1; // TODO: can we support NOT NULL fields?
-	let t =
+	let mut t =
 		ParquetType::primitive_type_builder(name, TDataType::get_physical_type())
 		.with_repetition(c.pq_repetition())
-		.with_converted_type(conv_type.unwrap_or(ConvertedType::NONE))
-		.with_logical_type(logical_type)
-		.build().unwrap();
+		.with_converted_type(conv_type.unwrap_or(ConvertedType::NONE));
+
+	match &logical_type {
+		Some(LogicalType::Decimal { scale, precision }) => {
+			t = t.with_precision(*precision).with_scale(*scale);
+		},
+		_ => {}
+	};
+	
+	let t = t.with_logical_type(logical_type).build().unwrap();
 
 	let cp =
 		create_primitive_appender::<T, TDataType, _, _>(&c, callback, convert);
