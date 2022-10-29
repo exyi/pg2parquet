@@ -19,7 +19,7 @@ use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnA
 use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
 use crate::myfrom::MyFrom;
 use crate::parquet_row_writer::{WriterStats, ParquetRowWriter, ParquetRowWriterImpl, WriterSettings};
-use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow};
+use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord};
 use crate::range_col_appender::RangeColumnAppender;
 
 type DynCopier<TRow> = Box<dyn ColumnCopier<TRow>>;
@@ -165,29 +165,18 @@ fn map_schema_column<TRow: PgAbstractRow>(
 			resolve_primitive::<PgEnum, ByteArrayType, _>(name, c, CreateCopierCallback::new(), Some(LogicalType::Enum), None),
 			// resolve_primitive::<PgEnum, Int32Type>(name, c, None, None),
 		Kind::Array(ref element_type) => {
-			let mut cc = c.clone();
-			cc.is_array = true;
-			cc.repetition_level += 1;
-			map_schema_column(element_type, name, &cc, s)
+			map_schema_column(element_type, name, &c.as_array(), s)
 		},
 		Kind::Domain(ref element_type) => {
 			map_schema_column(element_type, name, c, s)
 		},
 		&Kind::Range(ref element_type) => {
-			let mut cc = c.clone();
-			cc.is_array = false;
-			cc.col_i = 0;
-			cc.definition_level += 1;
 			// cc.repetition_level += c.is_array as i16;
-			let col_lower = map_schema_column(element_type, "lower", &cc, s);
-			cc.col_i += 1;
-			let col_upper = map_schema_column(element_type, "upper", &cc, s);
-			cc.col_i += 1;
-			let col_lower_incl = create_primitive_copier_simple::<bool, BoolType, _>(&cc);
-			cc.col_i += 1;
-			let col_upper_incl = create_primitive_copier_simple::<bool, BoolType, _>(&cc);
-			cc.col_i += 1;
-			let col_is_empty = create_primitive_copier_simple::<bool, BoolType, _>(&cc);
+			let col_lower = map_schema_column(element_type, "lower", &c.nest(0), s);
+			let col_upper = map_schema_column(element_type, "upper", &c.nest(1), s);
+			let col_lower_incl = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest(2));
+			let col_upper_incl = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest(3));
+			let col_is_empty = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest(4));
 
 			let schema = ParquetType::group_type_builder(name)
 				.with_fields(&mut vec![
@@ -197,7 +186,7 @@ fn map_schema_column<TRow: PgAbstractRow>(
 					Arc::new(ParquetType::primitive_type_builder("upper_inclusive", basic::Type::BOOLEAN).build().unwrap()),
 					Arc::new(ParquetType::primitive_type_builder("is_empty", basic::Type::BOOLEAN).build().unwrap()),
 				])
-				.with_repetition(if c.is_array { Repetition::REPEATED } else { Repetition::OPTIONAL })
+				.with_repetition(c.pq_repetition())
 				.build()
 				.unwrap();
 
@@ -208,6 +197,27 @@ fn map_schema_column<TRow: PgAbstractRow>(
 				col_upper_incl,
 				col_is_empty,
 			]);
+
+			(copier, schema)
+		},
+		&Kind::Composite(ref fields) => {
+			let fields: Vec<_> = fields.iter().enumerate().map(|(i, f)| {
+				let mut cc = c.clone();
+				cc.is_array = false;
+				cc.col_i = i;
+				cc.definition_level += 1;
+				map_schema_column::<PgRawRecord>(f.type_(), f.name(), &cc, s)
+			}).collect();
+
+			let (column_copiers, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
+
+			let schema = ParquetType::group_type_builder(name)
+				.with_fields(&mut parquet_types.into_iter().map(Arc::new).collect())
+				.with_repetition(c.pq_repetition())
+				.build()
+				.unwrap();
+
+			let copier = create_complex_appender::<PgRawRecord, _>(c, CreateCopierCallback::<TRow>::new(), column_copiers);
 
 			(copier, schema)
 		}
@@ -284,7 +294,7 @@ fn resolve_primitive<T: for<'a> FromSql<'a> + 'static, TDataType, Callback: Appe
 	c.definition_level += 1; // TODO: can we support NOT NULL fields?
 	let t =
 		ParquetType::primitive_type_builder(name, TDataType::get_physical_type())
-		.with_repetition(if c.is_array { Repetition::REPEATED } else { Repetition::OPTIONAL })
+		.with_repetition(c.pq_repetition())
 		.with_converted_type(conv_type.unwrap_or(ConvertedType::NONE))
 		.with_logical_type(logical_type)
 		.build().unwrap();
@@ -333,6 +343,34 @@ struct ColumnInfo {
 	pub is_array: bool,
 	pub definition_level: i16,
 	pub repetition_level: i16,
+}
+impl ColumnInfo {
+	fn pq_repetition(&self) -> Repetition {
+		if self.is_array {
+			Repetition::REPEATED
+		} else {
+			Repetition::OPTIONAL
+		}
+	}
+
+	fn nest(&self, col_i: usize) -> ColumnInfo {
+		ColumnInfo {
+			col_i,
+			is_array: false,
+			definition_level: self.definition_level + 1,
+			repetition_level: self.repetition_level,
+		}
+	}
+
+	fn as_array(&self) -> ColumnInfo {
+		assert!(self.is_array == false, "Parquet does not support nested arrays");
+		ColumnInfo {
+			col_i: self.col_i,
+			is_array: true,
+			definition_level: self.definition_level,
+			repetition_level: self.repetition_level + 1,
+		}
+	}
 }
 
 trait AppenderCallback {

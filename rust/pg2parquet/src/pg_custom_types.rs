@@ -1,6 +1,6 @@
 use std::{sync::Arc, any::TypeId};
 
-use postgres::types::{FromSql, Kind, WrongType};
+use postgres::types::{FromSql, Kind, WrongType, Field};
 
 fn read_pg_len(bytes: &[u8]) -> i32 {
 	let mut x = [0u8; 4];
@@ -134,6 +134,55 @@ impl<'a> FromSql<'a> for PgRawRange {
 		}
 	}
 }
+#[derive(Debug)]
+pub struct PgRawRecord {
+	pub ty: postgres::types::Type,
+	pub fields: Vec<Option<Vec<u8>>>
+}
+
+impl<'a> FromSql<'a> for PgRawRecord {
+    fn from_sql(ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+		// println!("Record type: {:?}, bytes: {:?}", ty, raw);
+        let fields = match ty.kind() {
+			Kind::Composite(fields) => fields,
+			_ => return Err("Not a record/composite type".into())
+		};
+
+		let mut index = 0;
+		let num_cols = read_pg_len(&raw[index..]) as usize;
+		index += 4;
+		assert!(num_cols <= fields.len());
+		let mut values = Vec::with_capacity(num_cols);
+		for field_i in 0..num_cols {
+			// println!("Reading field {}, bytes {:?}", fields[field_i].name(), &raw[index..]);
+			let oid = read_pg_len(&raw[index..]) as u32;
+			index += 4;
+			debug_assert_eq!(oid, fields[field_i].type_().oid());
+			let len = read_pg_len(&raw[index..]);
+			// println!("Reading field {}: {}, len {}", fields[field_i].name(), oid, len);
+			index += 4;
+			if len < 0 {
+				values.push(None);
+			} else {
+				let inner_buf = raw[index..index + len as usize].to_vec();
+				index += len as usize;
+				values.push(Some(inner_buf));
+			}
+		}
+
+		Ok(PgRawRecord {
+			ty: ty.clone(),
+			fields: values
+		})
+    }
+
+    fn accepts(ty: &postgres::types::Type) -> bool {
+		match ty.kind() {
+			Kind::Composite(_) => true,
+			_ => false
+		}
+    }
+}
 
 // const ZERO_BUFFER: &[u8] = &[0u8; 128];
 // const DEFAULT_JSONB: &[u8] = &[0, 0, 0, 1, '{' as u8, '}' as u8];
@@ -185,6 +234,31 @@ impl<'b> PgAbstractRow for PgRawRange {
 
     fn ab_len(&self) -> usize {
 		5
+    }
+}
+
+impl<'b> PgAbstractRow for PgRawRecord {
+    fn ab_get<'a, T: FromSql<'a>>(&'a self, index: usize) -> T {
+		// println!("ab_get: {:?} {:?}", index, &self);
+		let f = match self.ty.kind() {
+			Kind::Composite(fields) => &fields[index],
+			_ => unreachable!()
+		};
+		assert!(T::accepts(f.type_()));
+		if self.fields.len() < index {
+			return T::from_sql_null(f.type_()).unwrap()
+		}
+		match &self.fields[index] {
+			None => T::from_sql_null(f.type_()).unwrap(),
+			Some(x) => T::from_sql(f.type_(), &x).unwrap()
+		}
+	}
+
+    fn ab_len(&self) -> usize {
+		match self.ty.kind() {
+			Kind::Composite(fields) => fields.len(),
+			_ => unreachable!()
+		}
     }
 }
 
