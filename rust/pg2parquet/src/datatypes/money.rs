@@ -8,7 +8,7 @@ pub struct PgMoney {
 }
 
 impl<'a> FromSql<'a> for PgMoney {
-    fn from_sql(ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+    fn from_sql(_ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
         let mut b = [0u8; 8];
 		b.copy_from_slice(raw);
 		let amount = i64::from_be_bytes(b);

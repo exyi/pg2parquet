@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use postgres::{self, Client, NoTls, RowIter, Row, Column, Statement};
 use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
 
+use crate::PostgresConnArgs;
 use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize};
 use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
 use crate::datatypes::jsonb::PgRawJsonb;
@@ -58,24 +60,49 @@ pub fn default_settings() -> SchemaSettings {
 	}
 }
 
+fn read_password(user: &str) -> Result<String, String> {
+	print!("Password for user {}: ", user);
+	io::stdout().flush().unwrap();
+	let mut password = String::new();
+	io::stdin().read_line(&mut password).map_err(|x| x.to_string())?;
+	Ok(password)
+}
 
-pub fn execute_copy(query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
+fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
+	let user_env = std::env::var("PGUSER").ok();
+
 	let mut pg_config = postgres::Config::new();
-	pg_config.dbname("xx")
-		.host("127.0.0.1")
-		.port(5439)
-		.user("postgres")
-		.password("postgres");
-	let mut client = pg_config.connect(NoTls)
-		.map_err(|e| format!("DB connection failed: {}", e.to_string()))?;
+	pg_config.dbname(&args.dbname)
+		.application_name("pg2parquet")
+		.host(&args.host)
+		.port(args.port.unwrap_or(5432))
+		.user(args.user.as_ref().or(user_env.as_ref()).unwrap_or(&args.dbname));
 
+	if let Some(password) = args.password.as_ref() {
+		pg_config.password(password);
+	} else if let Ok(password) = std::env::var("PGPASSWORD") {
+		pg_config.password(&password);
+	} else {
+		pg_config.password(&read_password(pg_config.get_user().unwrap())?.trim());
+	}
+
+	// TODO: SSL
+
+	let client = pg_config.connect(NoTls).map_err(|e| format!("DB connection failed: {}", e.to_string()))?;
+
+	Ok(client)
+}
+
+pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
+
+	let mut client = pg_connect(pg_args)?;
 	let statement = client.prepare(query).map_err(|db_err| { db_err.to_string() })?;
 
 	let (copier, schema) = map_schema_root(statement.columns(), schema_settings)?;
 	eprintln!("Schema: {}", format_schema(&schema, 0));
 	let schema = Arc::new(schema);
 
-	let settings = WriterSettings { row_group_byte_limit: 500 * 1024 * 1024, row_group_row_limit: 1000000 };
+	let settings = WriterSettings { row_group_byte_limit: 500 * 1024 * 1024, row_group_row_limit: output_props.max_row_group_size() };
 
 	let output_file_f = std::fs::File::create(output_file).unwrap();
 	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props)

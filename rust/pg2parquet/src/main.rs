@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
-use std::{sync::Arc, path::PathBuf};
+use std::{sync::Arc, path::PathBuf, process};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum, Command};
 
 mod postgresutils;
 mod myfrom;
@@ -22,16 +22,52 @@ mod datatypes;
 #[command(bin_name = "pg2parquet")]
 enum CliCommand {
     /// Dumps something from a parquet file
+    #[command(arg_required_else_help = true)]
     ParquetInfo(ParquetInfoArgs),
+    #[command(arg_required_else_help = true)]
     PlaygroundCreateSomething(PlaygroundCreateSomethingArgs),
+    /// Exports a PostgreSQL table or query to a Parquet file
+    #[command(arg_required_else_help = true)]
     Export(ExportArgs)
 }
 
 #[derive(clap::Args, Debug, Clone)]
 struct ExportArgs {
+    /// Path to the output file. If the file exists, it will be overwritten.
+    #[arg(long, short = 'o')]
     output_file: PathBuf,
+    /// SQL query to execute. Exclusive with --table
+    #[arg(long, short = 'q')]
     query: Option<String>,
+    /// Which table should be exported. Exclusive with --query
+    #[arg(long, short = 't')]
+    table: Option<String>,
+    /// Compression applied on the output file. Default: zstd, change to Snappy or None if it's too slow
+    #[arg(long)]
+    compression: Option<ParquetCompression>,
+    #[command(flatten)]
+    postgres: PostgresConnArgs
 }
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct PostgresConnArgs {
+    #[arg(short='H', long)]
+    host: String,
+    /// Database user name. If not specified, PGUSER environment variable is used.
+    #[arg(short='U', long)]
+    user: Option<String>,
+    #[arg(short='d', long)]
+    dbname: String,
+    #[arg(short='p', long)]
+    port: Option<u16>,
+    /// Password to use for the connection. It is recommended to use the PGPASSWORD environment variable instead, since process arguments are visible to other users on the system.
+    #[arg(long)]
+    password: Option<String>,
+}
+
+
+#[derive(ValueEnum, Debug, Clone)]
+enum ParquetCompression { None, Snappy, Gzip, Lzo, Brotli, Lz4, Zstd }
 
 #[derive(clap::Args, Debug, Clone)]
 // #[command(author, version, about, long_about = None)]
@@ -54,13 +90,54 @@ fn handle_result<T, TErr: ToString>(r: Result<T, TErr>) -> T {
             eprintln!("Error occured while executing command {:?}", args.ok());
             eprintln!();
             eprintln!("{}", e.to_string());
-            std::process::exit(1);
+            process::exit(1);
         }
     }
 }
 
+fn perform_export(args: ExportArgs) {
+    if args.query.is_some() && args.table.is_some() {
+        eprintln!("Either query or table must be specified, but not both");
+        process::exit(1);
+    }
+    if args.query.is_none() && args.table.is_none() {
+        eprintln!("Either query or table must be specified");
+        process::exit(1);
+    }
+
+    let compression = match args.compression {
+        None => parquet::basic::Compression::ZSTD,
+        Some(ParquetCompression::Brotli) => parquet::basic::Compression::BROTLI,
+        Some(ParquetCompression::Gzip) => parquet::basic::Compression::GZIP,
+        Some(ParquetCompression::Lzo) => parquet::basic::Compression::LZO,
+        Some(ParquetCompression::Lz4) => parquet::basic::Compression::LZ4,
+        Some(ParquetCompression::Snappy) => parquet::basic::Compression::SNAPPY,
+        Some(ParquetCompression::Zstd) => parquet::basic::Compression::ZSTD,
+        Some(ParquetCompression::None) => parquet::basic::Compression::UNCOMPRESSED
+    };
+    let props =
+        parquet::file::properties::WriterProperties::builder()
+            .set_compression(compression)
+            .set_created_by("pg2parquet".to_owned())
+        .build();
+    let props = Arc::new(props);
+
+    let settings = postgres_cloner::default_settings();
+    let query = args.query.unwrap_or_else(|| {
+        format!("SELECT * FROM {}", args.table.unwrap())
+    });
+    let result = postgres_cloner::execute_copy(&args.postgres, &query, &args.output_file, props, &settings);
+    let stats = handle_result(result);
+
+    eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);
+}
+
+fn parse_args() -> CliCommand {
+    CliCommand::parse()
+}
+
 fn main() {
-    let args = CliCommand::parse();
+    let args = parse_args();
 
     match args {
         CliCommand::ParquetInfo(args) => {
@@ -72,18 +149,7 @@ fn main() {
             playground::create_something(&args.parquet_file);
         },
         CliCommand::Export(args) => {
-            // eprintln!("query: {:?}", args.query);
-            let props =
-                parquet::file::properties::WriterProperties::builder()
-                    .set_compression(parquet::basic::Compression::SNAPPY)
-                .build();
-            let props = Arc::new(props);
-    
-            let settings = postgres_cloner::default_settings();
-            let result = postgres_cloner::execute_copy(&args.query.unwrap(), &args.output_file, props, &settings);
-            let stats = handle_result(result);
-
-            eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);
+            perform_export(args);
         }
     }
 }
