@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::net::IpAddr;
@@ -38,22 +39,27 @@ pub struct SchemaSettings {
 	decimal_precision: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
 pub enum SchemaSettingsMacaddrHandling {
-	AsString,
-	AsByteArray,
-	AsInt64
+	/// MAC address is converted to a string
+	String,
+	/// MAC is stored as fixed byte array of length 6
+	ByteArray,
+	/// MAC is stored in Int64 (lowest 6 bytes)
+	Int64
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
 pub enum SchemaSettingsJsonHandling {
+	/// JSON is stored as a Parquet JSON type. This is essentially the same as string, but with a different ConvertedType, so it may not be supported in all tools.
 	StringMarkedAsJson,
+	/// JSON is stored as a string
 	String
 }
 
 pub fn default_settings() -> SchemaSettings {
 	SchemaSettings {
-		macaddr_handling: SchemaSettingsMacaddrHandling::AsString,
+		macaddr_handling: SchemaSettingsMacaddrHandling::String,
 		json_handling: SchemaSettingsJsonHandling::String, // DuckDB doesn't load JSON converted type, so better to use string I guess
 		decimal_scale: 18,
 		decimal_precision: 38,
@@ -320,11 +326,11 @@ fn map_simple_type<Callback: AppenderCallback>(
 
 		"macaddr" =>
 			match s.macaddr_handling {
-				SchemaSettingsMacaddrHandling::AsString =>
+				SchemaSettingsMacaddrHandling::String =>
 					resolve_primitive::<eui48::MacAddress, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
-				SchemaSettingsMacaddrHandling::AsByteArray =>
+				SchemaSettingsMacaddrHandling::ByteArray =>
 					resolve_primitive::<eui48::MacAddress, FixedLenByteArrayType, _>(name, c, callback, None, None),
-				SchemaSettingsMacaddrHandling::AsInt64 =>
+				SchemaSettingsMacaddrHandling::Int64 =>
 					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, callback, None, None),
 			},
 		"inet" =>

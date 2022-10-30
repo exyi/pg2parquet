@@ -3,6 +3,7 @@
 use std::{sync::Arc, path::PathBuf, process};
 
 use clap::{Parser, ValueEnum, Command};
+use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling};
 
 mod postgresutils;
 mod myfrom;
@@ -43,14 +44,17 @@ struct ExportArgs {
     #[arg(long, short = 't')]
     table: Option<String>,
     /// Compression applied on the output file. Default: zstd, change to Snappy or None if it's too slow
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     compression: Option<ParquetCompression>,
     #[command(flatten)]
-    postgres: PostgresConnArgs
+    postgres: PostgresConnArgs,
+    #[command(flatten)]
+    schema_settings: SchemaSettingsArgs,
 }
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct PostgresConnArgs {
+    /// Database server host
     #[arg(short='H', long)]
     host: String,
     /// Database user name. If not specified, PGUSER environment variable is used.
@@ -63,6 +67,20 @@ pub struct PostgresConnArgs {
     /// Password to use for the connection. It is recommended to use the PGPASSWORD environment variable instead, since process arguments are visible to other users on the system.
     #[arg(long)]
     password: Option<String>,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct SchemaSettingsArgs {
+    #[arg(long, hide_short_help = true, default_value = "string")]
+    macaddr_handling: SchemaSettingsMacaddrHandling,
+    #[arg(long, hide_short_help = true, default_value = "string")]
+	json_handling: SchemaSettingsJsonHandling,
+    /// How many decimal digits after the decimal point are stored in the Parquet file
+    #[arg(long, hide_short_help = true, default_value_t = 18)]
+	decimal_scale: i32,
+    /// How many decimal digits are allowed in numeric/DECIMAL column. By default 38, the largest value which fits in 128 bits.
+    #[arg(long, hide_short_help = true, default_value_t = 38)]
+	decimal_precision: u32,
 }
 
 
