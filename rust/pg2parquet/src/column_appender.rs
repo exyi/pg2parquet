@@ -82,6 +82,10 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 		let typed = writer.typed::<TPq>();
 		let _num_written = typed.write_batch(&self.column, dls, rls)?;
 
+		self.column.clear();
+		self.dls.clear();
+		self.rls.clear();
+
 		Ok(())
 	}
 }
