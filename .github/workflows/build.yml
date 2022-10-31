@@ -1,0 +1,57 @@
+name: Publish
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-rust:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust_target: [x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl, x86_64-pc-windows-gnu, aarch64-unknown-linux-gnu, riscv64gc-unknown-linux-gnu]
+        os: [ubuntu-latest]
+        include:
+          - rust_target: x86_64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@master
+        with:
+          target: ${{ matrix.rust_target }}
+          toolchain: stable
+          override: true
+      - name: Install Musl
+        if: matrix.rust_target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install musl-tools
+      - name: Install MinGW
+        if: matrix.rust_target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get install mingw-w64
+      - name: Install RiscV stuff
+        if: matrix.rust_target == 'riscv64gc-unknown-linux-gnu'
+        run: sudo apt-get install gcc-riscv64-linux-gnu
+      - name: Install ARM stuff
+        if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get install gcc-aarch64-linux-gnu
+      - name: Build
+        run: |
+          cd rust/pg2parquet
+          cargo build --release --target ${{ matrix.rust_target }}
+      - name: Copy and strip binary
+        if: matrix.rust_target != 'x86_64-pc-windows-gnu'
+        run: |
+          mkdir output_dir
+          cp rust/pg2parquet/target/${{ matrix.rust_target }}/release/pg2parquet output_dir/
+          strip output_dir/pg2parquet
+      - name: Copy binary
+        if: matrix.rust_target == 'x86_64-pc-windows-gnu'
+        run: |
+          mkdir output_dir
+          cp rust/pg2parquet/target/${{ matrix.rust_target }}/release/pg2parquet.exe output_dir/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-${{ matrix.rust_target }}
+          path: output_dir/pg2parquet
