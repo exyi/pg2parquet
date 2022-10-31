@@ -301,12 +301,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, callback, None, None),
 		"name" | "text" | "xml" | "bpchar" | "varchar" =>
 			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
-		"json" =>
-			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(match s.json_handling {
-				SchemaSettingsJsonHandling::String => ConvertedType::UTF8,
-				SchemaSettingsJsonHandling::StringMarkedAsJson => ConvertedType::JSON
-			})),
-		"jsonb" =>
+		"jsonb" | "json" =>
 			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, callback, None, Some(match s.json_handling {
 				SchemaSettingsJsonHandling::String => ConvertedType::UTF8,
 				SchemaSettingsJsonHandling::StringMarkedAsJson => ConvertedType::JSON
