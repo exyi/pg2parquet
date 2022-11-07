@@ -137,7 +137,8 @@ impl<'a> FromSql<'a> for PgRawRange {
 #[derive(Debug)]
 pub struct PgRawRecord {
 	pub ty: postgres::types::Type,
-	pub fields: Vec<Option<Vec<u8>>>
+	data: Vec<u8>,
+	fields: Vec<Option<usize>>
 }
 
 impl<'a> FromSql<'a> for PgRawRecord {
@@ -152,26 +153,28 @@ impl<'a> FromSql<'a> for PgRawRecord {
 		let num_cols = read_pg_len(&raw[index..]) as usize;
 		index += 4;
 		assert!(num_cols <= fields.len());
+		let data_buffer = raw[index..].to_vec();
+		index = 0;
 		let mut values = Vec::with_capacity(num_cols);
 		for field_i in 0..num_cols {
 			// println!("Reading field {}, bytes {:?}", fields[field_i].name(), &raw[index..]);
-			let oid = read_pg_len(&raw[index..]) as u32;
+			let oid = read_pg_len(&data_buffer[index..]) as u32;
 			index += 4;
 			debug_assert_eq!(oid, fields[field_i].type_().oid());
-			let len = read_pg_len(&raw[index..]);
+			let len = read_pg_len(&data_buffer[index..]);
 			// println!("Reading field {}: {}, len {}", fields[field_i].name(), oid, len);
-			index += 4;
 			if len < 0 {
 				values.push(None);
+				index += 4;
 			} else {
-				let inner_buf = raw[index..index + len as usize].to_vec();
-				index += len as usize;
-				values.push(Some(inner_buf));
+				values.push(Some(index));
+				index += 4 + len as usize;
 			}
 		}
 
 		Ok(PgRawRecord {
 			ty: ty.clone(),
+			data: data_buffer,
 			fields: values
 		})
     }
@@ -250,7 +253,10 @@ impl<'b> PgAbstractRow for PgRawRecord {
 		}
 		match &self.fields[index] {
 			None => T::from_sql_null(f.type_()).unwrap(),
-			Some(x) => T::from_sql(f.type_(), &x).unwrap()
+			Some(x) => {
+				let len = read_pg_len(&self.data[*x..]) as usize;
+				T::from_sql(f.type_(), &self.data[*x+4 .. x+4+len]).unwrap()
+			}
 		}
 	}
 

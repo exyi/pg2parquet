@@ -72,11 +72,11 @@ impl LevelIndexState {
 	pub fn copy_and_diff(&mut self, other: &LevelIndexList) -> i16 {
 		debug_assert_eq!(self.level(), other.level);
 
-		let mut result = self.level();
+		let mut result = other.level;
 		
-		let mut parent = Some(other);
-		let mut i = self.level();
-		while let Some(current_lvl) = parent {
+		let mut current_lvl = other;
+		let mut i = other.level;
+		loop {
 
 			debug_assert_eq!(i, current_lvl.level);
 
@@ -86,8 +86,13 @@ impl LevelIndexState {
 			}
 
 
-			parent = current_lvl.parent;
-			i -= 1;
+			match current_lvl.parent {
+				Some(parent) => {
+					current_lvl = parent;
+					i -= 1;
+				},
+				None => break
+			}
 		}
 
 		result

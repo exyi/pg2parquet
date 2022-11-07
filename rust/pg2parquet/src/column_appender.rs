@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use parquet::data_type::{DataType, AsBytes, SliceAsBytes};
+use parquet::data_type::{DataType, AsBytes, SliceAsBytes, ByteArray};
 use parquet::{errors::ParquetError, file::writer::SerializedColumnWriter};
 use parquet::column::writer::{GenericColumnWriter, Level};
 use postgres::types::FromSql;
@@ -61,10 +61,6 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 		}
 	}
 
-	pub fn element_size(&self) -> usize {
-		size_of::<TPq>() + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2
-	}
-
 	pub fn convert(&self, value: TPg) -> TPq::T {
 		(self.conversion)(value)
 	}
@@ -78,7 +74,6 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 		// 	println!("           RLS: {:?}", self.rls);
 		// 	println!("           DLS: {:?}", self.dls);
 		// }
-		
 		let typed = writer.typed::<TPq>();
 		let _num_written = typed.write_batch(&self.column, dls, rls)?;
 

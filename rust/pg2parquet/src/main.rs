@@ -17,6 +17,13 @@ mod postgres_cloner;
 mod pg_custom_types;
 mod datatypes;
 
+#[cfg(not(target_env = "msvc"))]
+use jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "pg2parquet")]
