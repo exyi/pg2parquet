@@ -17,12 +17,12 @@ mod postgres_cloner;
 mod pg_custom_types;
 mod datatypes;
 
-#[cfg(not(target_family = "windows"))]
+#[cfg(not(any(target_family = "windows", target_arch = "riscv64")))]
 use jemallocator::Jemalloc;
 
 use crate::postgres_cloner::SchemaSettings;
 
-#[cfg(not(target_family = "windows"))]
+#[cfg(not(any(target_family = "windows", target_arch = "riscv64")))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
