@@ -35,21 +35,29 @@ jobs:
       - name: Install ARM stuff
         if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get install gcc-aarch64-linux-gnu
+      # - name: Build
+      #   run: |
+      #     cd cli
+      #     cargo build --profile ci-build --locked --target ${{ matrix.rust_target }}
+
       - name: Build
-        run: |
-          cd cli
-          cargo build --profile ci-build --locked --target ${{ matrix.rust_target }}
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.rust_target == 'x86_64-unknown-linux-musl' || matrix.rust_target == 'x86_64-pc-windows-gnu' || matrix.rust_target == 'aarch64-unknown-linux-gnu' || matrix.rust_target == 'riscv64gc-unknown-linux-gnu' }}
+          command: build
+          args: --locked --profile ci-build --manifest-path=cli/Cargo.toml --target=${{ matrix.rust_target }}
+
       - name: Copy and strip binary
         if: matrix.rust_target != 'x86_64-pc-windows-gnu'
         run: |
           mkdir output_dir
-          cp cli/target/${{ matrix.rust_target }}/release/pg2parquet output_dir/
+          cp cli/target/${{ matrix.rust_target }}/ci-build/pg2parquet output_dir/
           strip output_dir/pg2parquet
       - name: Copy binary
         if: matrix.rust_target == 'x86_64-pc-windows-gnu'
         run: |
           mkdir output_dir
-          cp cli/target/${{ matrix.rust_target }}/release/pg2parquet.exe output_dir/
+          cp cli/target/${{ matrix.rust_target }}/ci-build/pg2parquet.exe output_dir/
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:

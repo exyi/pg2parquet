@@ -16,7 +16,7 @@ bit-vec = "0.6.3"
 pg_bigdecimal = "0.1.5"
 # postgres-openssl = "0.5.0"
 
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
+[target.'cfg(not(target_family = "windows"))'.dependencies]
 jemallocator = "0.3.2"
 
 [profile.release]
