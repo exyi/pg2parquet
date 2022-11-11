@@ -6,7 +6,12 @@ use parquet::format::{self, StringType};
 use std::mem;
 use std::{fs, sync::Arc};
 
+#[cfg(not(debug_assertions))]
+pub fn create_something(file_path: &std::path::PathBuf) {
+	println!("Disabled in release build")
+}
 
+#[cfg(debug_assertions)]
 pub fn create_something(file_path: &std::path::PathBuf) {
 	let file = fs::File::create(&file_path).unwrap();
 	let props =

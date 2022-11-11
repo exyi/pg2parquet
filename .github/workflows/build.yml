@@ -37,19 +37,19 @@ jobs:
         run: sudo apt-get install gcc-aarch64-linux-gnu
       - name: Build
         run: |
-          cd rust/pg2parquet
-          cargo build --release --target ${{ matrix.rust_target }}
+          cd cli
+          cargo build --profile ci-build --locked --target ${{ matrix.rust_target }}
       - name: Copy and strip binary
         if: matrix.rust_target != 'x86_64-pc-windows-gnu'
         run: |
           mkdir output_dir
-          cp rust/pg2parquet/target/${{ matrix.rust_target }}/release/pg2parquet output_dir/
+          cp cli/target/${{ matrix.rust_target }}/release/pg2parquet output_dir/
           strip output_dir/pg2parquet
       - name: Copy binary
         if: matrix.rust_target == 'x86_64-pc-windows-gnu'
         run: |
           mkdir output_dir
-          cp rust/pg2parquet/target/${{ matrix.rust_target }}/release/pg2parquet.exe output_dir/
+          cp cli/target/${{ matrix.rust_target }}/release/pg2parquet.exe output_dir/
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:

@@ -20,6 +20,13 @@ pg_bigdecimal = "0.1.5"
 jemallocator = "0.3.2"
 
 [profile.release]
+# codegen-units = 1
+# strip = true
+# lto = true
+# opt-level = "z"
+
+[profile.ci-build]
+inherits = "release"
 codegen-units = 1
 lto = true
-# opt-level = "z"
+# strip = true

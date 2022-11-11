@@ -3,7 +3,7 @@
 use std::{sync::Arc, path::PathBuf, process};
 
 use clap::{Parser, ValueEnum, Command};
-use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling};
+use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling, SchemaSettingsEnumHandling};
 
 mod postgresutils;
 mod myfrom;
@@ -20,6 +20,8 @@ mod datatypes;
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
 
+use crate::postgres_cloner::SchemaSettings;
+
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -30,9 +32,9 @@ static GLOBAL: Jemalloc = Jemalloc;
 #[command(bin_name = "pg2parquet")]
 enum CliCommand {
     /// Dumps something from a parquet file
-    #[command(arg_required_else_help = true)]
+    #[command(arg_required_else_help = true, hide = true)]
     ParquetInfo(ParquetInfoArgs),
-    #[command(arg_required_else_help = true)]
+    #[command(arg_required_else_help = true, hide = true)]
     PlaygroundCreateSomething(PlaygroundCreateSomethingArgs),
     /// Exports a PostgreSQL table or query to a Parquet file
     #[command(arg_required_else_help = true)]
@@ -78,10 +80,15 @@ pub struct PostgresConnArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct SchemaSettingsArgs {
-    #[arg(long, hide_short_help = true, default_value = "string")]
+    /// How to handle `macaddr` columns
+    #[arg(long, hide_short_help = true, default_value = "text")]
     macaddr_handling: SchemaSettingsMacaddrHandling,
-    #[arg(long, hide_short_help = true, default_value = "string")]
+    /// How to handle `json` and `jsonb` columns
+    #[arg(long, hide_short_help = true, default_value = "text")]
 	json_handling: SchemaSettingsJsonHandling,
+    /// How to handle enum (Enumerated Type) columns 
+    #[arg(long, hide_short_help = true, default_value = "text")]
+    enum_handling: SchemaSettingsEnumHandling,
     /// How many decimal digits after the decimal point are stored in the Parquet file
     #[arg(long, hide_short_help = true, default_value_t = 18)]
 	decimal_scale: i32,
@@ -147,7 +154,13 @@ fn perform_export(args: ExportArgs) {
         .build();
     let props = Arc::new(props);
 
-    let settings = postgres_cloner::default_settings();
+    let settings = SchemaSettings {
+        macaddr_handling: args.schema_settings.macaddr_handling,
+        json_handling: args.schema_settings.json_handling,
+        enum_handling: args.schema_settings.enum_handling,
+        decimal_scale: args.schema_settings.decimal_scale,
+        decimal_precision: args.schema_settings.decimal_precision,
+    };
     let query = args.query.unwrap_or_else(|| {
         format!("SELECT * FROM {}", args.table.unwrap())
     });

@@ -33,16 +33,17 @@ type ResolvedColumn<TRow> = (DynCopier<TRow>, ParquetType);
 
 #[derive(Clone, Debug)]
 pub struct SchemaSettings {
-	macaddr_handling: SchemaSettingsMacaddrHandling,
-	json_handling: SchemaSettingsJsonHandling,
-	decimal_scale: i32,
-	decimal_precision: u32,
+	pub macaddr_handling: SchemaSettingsMacaddrHandling,
+	pub json_handling: SchemaSettingsJsonHandling,
+	pub enum_handling: SchemaSettingsEnumHandling,
+	pub decimal_scale: i32,
+	pub decimal_precision: u32,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 pub enum SchemaSettingsMacaddrHandling {
 	/// MAC address is converted to a string
-	String,
+	Text,
 	/// MAC is stored as fixed byte array of length 6
 	ByteArray,
 	/// MAC is stored in Int64 (lowest 6 bytes)
@@ -51,16 +52,25 @@ pub enum SchemaSettingsMacaddrHandling {
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 pub enum SchemaSettingsJsonHandling {
-	/// JSON is stored as a Parquet JSON type. This is essentially the same as string, but with a different ConvertedType, so it may not be supported in all tools.
-	StringMarkedAsJson,
-	/// JSON is stored as a string
-	String
+	/// JSON is stored as a Parquet JSON type. This is essentially the same as text, but with a different ConvertedType, so it may not be supported in all tools.
+	TextMarkedAsJson,
+	/// JSON is stored as a UTF8 text
+	Text
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum SchemaSettingsEnumHandling {
+	/// Enum is stored as the postgres enum name
+	Text,
+	/// Enum is stored as an 32-bit integer (zero-based index of the value in the enum definition)
+	Int
 }
 
 pub fn default_settings() -> SchemaSettings {
 	SchemaSettings {
-		macaddr_handling: SchemaSettingsMacaddrHandling::String,
-		json_handling: SchemaSettingsJsonHandling::String, // DuckDB doesn't load JSON converted type, so better to use string I guess
+		macaddr_handling: SchemaSettingsMacaddrHandling::Text,
+		json_handling: SchemaSettingsJsonHandling::Text, // DuckDB doesn't load JSON converted type, so better to use string I guess
+		enum_handling: SchemaSettingsEnumHandling::Text,
 		decimal_scale: 18,
 		decimal_precision: 38,
 	}
@@ -207,8 +217,12 @@ fn map_schema_column<TRow: PgAbstractRow>(
 		Kind::Simple =>
 			map_simple_type(t, c, s, CreateCopierCallback::new()),
 		Kind::Enum(ref _enum_data) =>
-			Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, CreateCopierCallback::new(), Some(LogicalType::Enum), None)),
-			// resolve_primitive::<PgEnum, Int32Type>(name, c, None, None),
+			match s.enum_handling {
+				SchemaSettingsEnumHandling::Int =>
+					Ok(resolve_primitive::<PgEnum, Int32Type, _>(c.col_name(), c, CreateCopierCallback::new(), None, None)),
+				SchemaSettingsEnumHandling::Text =>
+					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, CreateCopierCallback::new(), Some(LogicalType::Enum), None)),
+			}
 		Kind::Array(ref element_type) => {
 			map_schema_column(element_type, &c.as_array(), s)
 		},
@@ -303,8 +317,8 @@ fn map_simple_type<Callback: AppenderCallback>(
 			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
 		"jsonb" | "json" =>
 			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, callback, None, Some(match s.json_handling {
-				SchemaSettingsJsonHandling::String => ConvertedType::UTF8,
-				SchemaSettingsJsonHandling::StringMarkedAsJson => ConvertedType::JSON
+				SchemaSettingsJsonHandling::Text => ConvertedType::UTF8,
+				SchemaSettingsJsonHandling::TextMarkedAsJson => ConvertedType::JSON
 			})),
 		"timestamptz" =>
 			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, callback, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: true, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
@@ -318,10 +332,9 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"uuid" =>
 			resolve_primitive::<uuid::Uuid, FixedLenByteArrayType, _>(name, c, callback, Some(LogicalType::Uuid), None),
 
-
 		"macaddr" =>
 			match s.macaddr_handling {
-				SchemaSettingsMacaddrHandling::String =>
+				SchemaSettingsMacaddrHandling::Text =>
 					resolve_primitive::<eui48::MacAddress, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
 				SchemaSettingsMacaddrHandling::ByteArray =>
 					resolve_primitive::<eui48::MacAddress, FixedLenByteArrayType, _>(name, c, callback, None, None),

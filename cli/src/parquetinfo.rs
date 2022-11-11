@@ -20,7 +20,12 @@ fn print_col_info<T: DataType<T = T2>, T2: Default + Clone + std::fmt::Debug>(co
 		println!("rls: {:?}", rls[0..valuecount].to_vec());
 	}
 }
+#[cfg(not(debug_assertions))]
+pub fn print_parquet_info(path: &std::path::PathBuf) {
+	println!("Disabled in release build")
+}
 
+#[cfg(debug_assertions)]
 pub fn print_parquet_info(path: &std::path::PathBuf) {
 	let file = std::fs::File::open(path).unwrap();
 	let reader = SerializedFileReader::new(file).unwrap();
