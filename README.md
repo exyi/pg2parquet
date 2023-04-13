@@ -8,6 +8,22 @@ Simple tool for exporting PostgreSQL tables into parquet, with support for more 
 
 Download the binary from [Github Actions](https://github.com/exyi/pg2parquet/actions/workflows/build.yml?query=branch%3Amain) artifacts (click on the latest run, scroll to the bottom, choose your system).
 
+### Using Nix flakes
+
+If you use Nix, this command will install the latest pg2parquet version. It compiles it from sources, so the installation will take some time.
+
+```
+nix shell github:exyi/pg2parquet
+```
+
+Then use the `pg2parquet` in the new shell. Note that you might need to add `--extra-experimental-features 'nix-command flakes'` argument to the nix invocation.
+
+### Using Cargo
+
+```
+cargo install pg2parquet
+```
+
 ### From Sources
 
 Install Rust and Cargo. Clone the repo.
