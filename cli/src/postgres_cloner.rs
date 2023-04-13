@@ -313,7 +313,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, callback, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, callback, None, Some(ConvertedType::INT_8)),
 		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, callback, None, None),
-		"name" | "text" | "xml" | "bpchar" | "varchar" =>
+		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
 			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
 		"jsonb" | "json" =>
 			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, callback, None, Some(match s.json_handling {
