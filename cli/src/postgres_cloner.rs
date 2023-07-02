@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::error::Error;
+use native_tls::TlsConnector;
 use parquet::basic::{Repetition, self, ConvertedType, LogicalType};
 use parquet::data_type::{DataType, BoolType, Int32Type, Int64Type, FloatType, DoubleType, ByteArray, ByteArrayType, FixedLenByteArrayType, FixedLenByteArray};
 use parquet::file::properties::WriterPropertiesPtr;
@@ -13,8 +14,9 @@ use parquet::file::writer::SerializedFileWriter;
 use parquet::format::TimestampType;
 use postgres::error::SqlState;
 use postgres::types::{Kind, Type as PgType, FromSql};
-use postgres::{self, Client, NoTls, RowIter, Row, Column, Statement};
+use postgres::{self, Client, RowIter, Row, Column, Statement};
 use postgres::fallible_iterator::FallibleIterator;
+use postgres_native_tls::MakeTlsConnector;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
 
 use crate::PostgresConnArgs;
@@ -102,9 +104,10 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 		pg_config.password(&read_password(pg_config.get_user().unwrap())?.trim());
 	}
 
-	// TODO: SSL
+	let connector = TlsConnector::new().unwrap();
+	let connector = MakeTlsConnector::new(connector);
 
-	let client = pg_config.connect(NoTls).map_err(|e| format!("DB connection failed: {}", e.to_string()))?;
+	let client = pg_config.connect(connector).map_err(|e| format!("DB connection failed: {}", e.to_string()))?;
 
 	Ok(client)
 }
