@@ -75,10 +75,6 @@ You can also use environment variables `$PGPASSWORD` and `$PGUSER`
 * Not all PostgreSQL types are supported
 	* Workaround: Convert it to text (or other supported type) on PostgreSQL side `--query 'select weird_type_column::text from my_table'`
 	* Please [submit an issue](https://github.com/exyi/pg2parquet/issues/new)
-* SSL/TLS is currently unsupported
-	* Workaround 1: Avoid network by running this on your DB server (note that there is fully static Musl build available)
-	* Workaround 2: https://www.reddit.com/r/PostgreSQL/comments/bbs3ja/pgsql_ssl_proxy/
-	* Workaround 3: It shouldn't be the that hard to add TLS support, I'm just lazy
 * I need the file in slightly different format (rename columns, ...)
 	* Workaround 1: Use the `--query` parameter to shape the resulting schema
 	* Workaround 2: Use DuckDB or Spark to postprocess the parquet file
