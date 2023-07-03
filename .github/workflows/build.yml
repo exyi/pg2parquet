@@ -34,7 +34,7 @@ jobs:
         run: sudo apt-get install gcc-riscv64-linux-gnu
       - name: Install ARM stuff
         if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get install gcc-aarch64-linux-gnu
+        run: sudo apt-get install gcc-aarch64-linux-gnu && sudo dpkg --add-architecture arm64 && sudo apt-get install libssl-dev:arm64
       # - name: Build
       #   run: |
       #     cd cli
@@ -48,7 +48,7 @@ jobs:
           args: --locked --profile ci-build --manifest-path=cli/Cargo.toml --target=${{ matrix.rust_target }}
 
       - name: Copy and strip binary
-        if: matrix.rust_target == 'x86_64-unknown-linux-musl' 
+        if: matrix.rust_target == 'x86_64-unknown-linux-musl'
         run: |
           mkdir output_dir
           cp cli/target/${{ matrix.rust_target }}/ci-build/pg2parquet output_dir/
