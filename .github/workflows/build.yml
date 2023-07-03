@@ -34,7 +34,15 @@ jobs:
         run: sudo apt-get install gcc-riscv64-linux-gnu
       - name: Install ARM stuff
         if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
-        run: sudo dpkg --add-architecture arm64 && sudo apt-get update && sudo apt-get install gcc-aarch64-linux-gnu libssl-dev:arm64
+        run: |
+          cat << EOF | sudo tee -a /etc/apt/sources.list
+          deb [arch=arm64] http://ports.ubuntu.com/ jammy main multiverse universe
+          deb [arch=arm64] http://ports.ubuntu.com/ jammy-security main multiverse universe
+          deb [arch=arm64] http://ports.ubuntu.com/ jammy-backports main multiverse universe
+          deb [arch=arm64] http://ports.ubuntu.com/ jammy-updates main multiverse universe
+          EOF
+          sudo dpkg --add-architecture arm64 && \
+          sudo apt-get update && sudo apt-get install gcc-aarch64-linux-gnu libssl-dev:arm64
       # - name: Build
       #   run: |
       #     cd cli
