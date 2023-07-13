@@ -13,7 +13,7 @@ use parquet::file::writer::SerializedFileWriter;
 use parquet::format::TimestampType;
 use postgres::error::SqlState;
 use postgres::types::{Kind, Type as PgType, FromSql};
-use postgres::{self, Client, NoTls, RowIter, Row, Column, Statement};
+use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
 use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
 
@@ -84,6 +84,18 @@ fn read_password(user: &str) -> Result<String, String> {
 	Ok(password)
 }
 
+#[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64"))))]
+fn build_tls_connector() -> Result<postgres_native_tls::MakeTlsConnector, String> {
+	let connector = native_tls::TlsConnector::new().map_err(|e| format!("Creating TLS connector failed: {}", e.to_string()))?;
+	let pg_connector = postgres_native_tls::MakeTlsConnector::new(connector);
+	Ok(pg_connector)
+}
+
+#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64")))))]
+fn build_tls_connector() -> Result<NoTls, String> {
+	Ok(NoTls)
+}
+
 fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 	let user_env = std::env::var("PGUSER").ok();
 
@@ -102,9 +114,9 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 		pg_config.password(&read_password(pg_config.get_user().unwrap())?.trim());
 	}
 
-	// TODO: SSL
+	let connector = build_tls_connector()?;
 
-	let client = pg_config.connect(NoTls).map_err(|e| format!("DB connection failed: {}", e.to_string()))?;
+	let client = pg_config.connect(connector).map_err(|e| format!("DB connection failed: {}", e.to_string()))?;
 
 	Ok(client)
 }
