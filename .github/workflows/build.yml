@@ -30,20 +30,23 @@ jobs:
           use-cross: ${{ matrix.rust_target == 'x86_64-unknown-linux-musl' || matrix.rust_target == 'x86_64-pc-windows-gnu' || matrix.rust_target == 'aarch64-unknown-linux-gnu' || matrix.rust_target == 'riscv64gc-unknown-linux-gnu' }}
           command: build
           args: --locked --profile ci-build --manifest-path=cli/Cargo.toml --target=${{ matrix.rust_target }}
-
-      - name: Copy and strip binary
-        if: matrix.rust_target == 'x86_64-unknown-linux-musl' 
+      - name: Copy binary
+        if: matrix.rust_target != 'x86_64-pc-windows-gnu'
         run: |
           mkdir output_dir
           cp cli/target/${{ matrix.rust_target }}/ci-build/pg2parquet output_dir/
-          strip output_dir/pg2parquet
       - name: Copy binary
         if: matrix.rust_target == 'x86_64-pc-windows-gnu'
         run: |
           mkdir output_dir
           cp cli/target/${{ matrix.rust_target }}/ci-build/pg2parquet.exe output_dir/
+
+      - name: Strip binary
+        if: matrix.rust_target == 'x86_64-unknown-linux-musl' 
+        run: |
+          strip output_dir/pg2parquet
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:
           name: release-${{ matrix.rust_target }}
-          path: output_dir/pg2parquet
+          path: output_dir/pg2parquet${{ matrix.rust_target == 'x86_64-pc-windows-gnu' && '.exe' || '' }}
