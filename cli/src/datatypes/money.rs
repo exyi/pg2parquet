@@ -2,6 +2,8 @@ use postgres::types::FromSql;
 
 use crate::myfrom::MyFrom;
 
+use super::utils;
+
 
 pub struct PgMoney {
 	pub amount: i64
@@ -9,9 +11,7 @@ pub struct PgMoney {
 
 impl<'a> FromSql<'a> for PgMoney {
     fn from_sql(_ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        let mut b = [0u8; 8];
-		b.copy_from_slice(raw);
-		let amount = i64::from_be_bytes(b);
+		let amount = utils::read_i64(&raw);
 		Ok(PgMoney { amount })
     }
 

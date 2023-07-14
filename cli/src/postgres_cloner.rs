@@ -20,6 +20,7 @@ use parquet::schema::types::{Type as ParquetType, TypePtr};
 use crate::PostgresConnArgs;
 use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize};
 use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
+use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::new_decimal_bytes_appender;
@@ -342,14 +343,14 @@ fn map_simple_type<Callback: AppenderCallback>(
 			resolve_primitive::<chrono::NaiveTime, Int64Type, _>(name, c, callback, Some(LogicalType::Time { is_adjusted_to_u_t_c: false, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
 
 		"uuid" =>
-			resolve_primitive::<uuid::Uuid, FixedLenByteArrayType, _>(name, c, callback, Some(LogicalType::Uuid), None),
+			resolve_primitive_conv::<uuid::Uuid, FixedLenByteArrayType, _, _>(name, c, callback, Some(16), Some(LogicalType::Uuid), None, |v| MyFrom::my_from(v)),
 
 		"macaddr" =>
 			match s.macaddr_handling {
 				SchemaSettingsMacaddrHandling::Text =>
 					resolve_primitive::<eui48::MacAddress, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
 				SchemaSettingsMacaddrHandling::ByteArray =>
-					resolve_primitive::<eui48::MacAddress, FixedLenByteArrayType, _>(name, c, callback, None, None),
+					resolve_primitive_conv::<eui48::MacAddress, FixedLenByteArrayType, _, _>(name, c, callback, Some(6), None, None, |v| MyFrom::my_from(v)),
 				SchemaSettingsMacaddrHandling::Int64 =>
 					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, callback, None, None),
 			},
@@ -358,7 +359,10 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"bit" | "varbit" =>
 			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
 
-		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Aclitem Bpchar Interval Timetz Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
+		"interval" =>
+			resolve_primitive_conv::<PgInterval, FixedLenByteArrayType, _, _>(name, c, callback, Some(12), None, Some(ConvertedType::INTERVAL), |v| MyFrom::my_from(v)),
+
+		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Aclitem Bpchar Timetz Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
 
 
 		n => 
@@ -374,14 +378,14 @@ fn resolve_primitive<T: for<'a> FromSql<'a> + 'static, TDataType, Callback: Appe
 	conv_type: Option<ConvertedType>
 ) -> (Callback::TResult, ParquetType)
 	where TDataType: DataType, TDataType::T : RealMemorySize + MyFrom<T> {
-	resolve_primitive_conv::<T, TDataType, _, Callback>(name, c, callback, logical_type, conv_type, |v| MyFrom::my_from(v))
+	resolve_primitive_conv::<T, TDataType, _, Callback>(name, c, callback, None, logical_type, conv_type, |v| MyFrom::my_from(v))
 }
-
 
 fn resolve_primitive_conv<T: for<'a> FromSql<'a> + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, Callback: AppenderCallback>(
 	name: &str,
 	c: &ColumnInfo,
 	callback: Callback,
+	length: Option<i32>,
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
@@ -393,6 +397,13 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + 'static, TDataType, FConversi
 		ParquetType::primitive_type_builder(name, TDataType::get_physical_type())
 		.with_repetition(c.pq_repetition())
 		.with_converted_type(conv_type.unwrap_or(ConvertedType::NONE));
+
+	match length {
+		Some(l) => {
+			t = t.with_length(l);
+		},
+		_ => {}
+	};
 
 	match &logical_type {
 		Some(LogicalType::Decimal { scale, precision }) => {

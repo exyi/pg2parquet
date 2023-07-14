@@ -52,6 +52,7 @@ You can also use environment variables `$PGPASSWORD` and `$PGUSER`
 ## Supported types
 
 * **Basic SQL types**: `text`, `char`, `varchar` and friends, all kinds of `int`s, `bool`, floating point numbers, `timestamp`, `timestamptz`, `date`, `time`, `uuid`
+  * `interval` - interval has lower precision in Parquet (ms) than in Postgres (µs), so the conversion is lossy
 * **Decimal numeric types**
 	* `numeric` will have fixed precision according to the `--decimal-scale` and `--decimal-precision` parameters
 	* `money` is always a 64-bit decimal with 2 decimal places
