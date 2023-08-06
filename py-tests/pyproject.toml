@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "pg2parquet-pytests"
+version = "0.1.0"
+description = ""
+authors = ["Standa Lukeš <git@exyi.cz>"]
+packages = [{include = "pg2parquet_pytests"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pyarrow = "^12.0.1"
+psycopg = "^3.1.10"
+duckdb = "^0.8.1"
+polars = "^0.18.12"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

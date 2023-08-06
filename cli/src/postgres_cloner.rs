@@ -307,7 +307,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"bool" => resolve_primitive::<bool, BoolType, _>(name, c, callback, None, None),
 		"int2" => resolve_primitive::<i16, Int32Type, _>(name, c, callback, None, Some(ConvertedType::INT_16)),
 		"int4" => resolve_primitive::<i32, Int32Type, _>(name, c, callback, None, None),
-		"oid" => resolve_primitive::<u32, Int32Type, _>(name, c, callback, None, None),
+		"oid" => resolve_primitive::<u32, Int32Type, _>(name, c, callback, Some(LogicalType::Integer { bit_width: 32, is_signed: false }), None),
 		"int8" => resolve_primitive::<i64, Int64Type, _>(name, c, callback, None, None),
 		"float4" => resolve_primitive::<f32, FloatType, _>(name, c, callback, None, None),
 		"float8" => resolve_primitive::<f64, DoubleType, _>(name, c, callback, None, None),
@@ -324,7 +324,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 			(cp, schema)
 		},
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, callback, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
-		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, callback, None, Some(ConvertedType::INT_8)),
+		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, callback, Some(LogicalType::Integer { bit_width: 8, is_signed: false }), None),
 		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, callback, None, None),
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
 			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
