@@ -21,7 +21,7 @@ Then use the `pg2parquet` in the new shell. Note that you might need to add `--e
 ### Using Cargo
 
 ```
-cargo install pg2parquet@0.1.0-beta.4
+cargo install pg2parquet@0.1.0-beta.6
 ```
 
 ### From Sources
