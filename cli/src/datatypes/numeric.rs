@@ -3,7 +3,9 @@ use std::borrow::Cow;
 use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal};
 
-use crate::{column_appender::{ColumnAppender, GenericColumnAppender, ColumnAppenderBase}, level_index::LevelIndexList, column_pg_copier::DynamicSerializedWriter, myfrom::MyFrom};
+use crate::appenders::{GenericColumnAppender, ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter};
+use crate::level_index::LevelIndexList;
+use crate::myfrom::MyFrom;
 
 
 fn convert_decimal_to_bytes(d: &BigDecimal, scale: i32, precision: u32) -> Vec<u8> {

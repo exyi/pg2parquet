@@ -10,12 +10,11 @@ mod myfrom;
 mod level_index;
 mod parquetinfo;
 mod playground;
-mod column_appender;
-mod column_pg_copier;
-mod parquet_row_writer;
+mod parquet_writer;
 mod postgres_cloner;
 mod pg_custom_types;
 mod datatypes;
+mod appenders;
 
 #[cfg(not(any(target_family = "windows", target_arch = "riscv64")))]
 use jemallocator::Jemalloc;

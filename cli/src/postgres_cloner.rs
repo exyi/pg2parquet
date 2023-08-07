@@ -20,14 +20,13 @@ use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
 
 use crate::PostgresConnArgs;
-use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize, DynColumnAppender, ColumnAppenderBase};
-use crate::column_pg_copier::{MergedColumnAppender, BasicPgRowColumnAppender};
+use crate::appenders::{ColumnAppender, DynamicMergedAppender, RealMemorySize, ArrayColumnAppender, ColumnAppenderBase, GenericColumnAppender, BasicPgRowColumnAppender, RcWrapperAppender};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::new_decimal_bytes_appender;
 use crate::myfrom::{MyFrom, self};
-use crate::parquet_row_writer::{WriterStats, ParquetRowWriter, ParquetRowWriterImpl, WriterSettings};
+use crate::parquet_writer::{WriterStats, ParquetRowWriter, WriterSettings};
 use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef};
 
 pub type DynRowAppender<TRow> = Box<dyn ColumnAppender<Arc<TRow>>>;
@@ -137,7 +136,7 @@ pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathB
 	let output_file_f = std::fs::File::create(output_file).unwrap();
 	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props)
 		.map_err(|e| format!("Failed to create parquet writer: {}", e))?;
-	let mut row_writer = ParquetRowWriterImpl::new(pq_writer, schema.clone(), row_appender, settings)
+	let mut row_writer = ParquetRowWriter::new(pq_writer, schema.clone(), row_appender, settings)
 		.map_err(|e| format!("Failed to create row writer: {}", e))?;
 
 	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[]).unwrap();
@@ -214,7 +213,7 @@ fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedCol
 
 	let (column_appenders, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
 
-	let merged_appender: DynRowAppender<Row> = Box::new(MergedColumnAppender::new(column_appenders, 0, 0));
+	let merged_appender: DynRowAppender<Row> = Box::new(DynamicMergedAppender::new(column_appenders, 0, 0));
 	let struct_type = ParquetType::group_type_builder("root")
 		.with_fields(&mut parquet_types.into_iter().map(Arc::new).collect())
 		.build()
@@ -467,7 +466,7 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + Clone + 'static, TDataTyp
 }
 
 fn create_complex_appender<T: for <'a> FromSql<'a> + Clone + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, columns: Vec<DynRowAppender<T>>) -> Callback::TResult {
-	let main_cp = MergedColumnAppender::new(columns, c.definition_level + 1, c.repetition_level);
+	let main_cp = DynamicMergedAppender::new(columns, c.definition_level + 1, c.repetition_level);
 	let unwrapped = RcWrapperAppender::new(main_cp);
 	callback.f(c, unwrapped)
 }
@@ -479,37 +478,6 @@ fn create_array_appender<Callback: AppenderCallback>(inner: DynRowAppender<PgAny
 	let array_appender = ArrayColumnAppender::new(unwrapped_appender, true, true, outer_dl, c.repetition_level);
 	callback.f::<Vec<Option<PgAny>>, _>(c, array_appender)
 }
-
-pub struct RcWrapperAppender<T, TInner: ColumnAppender<Arc<T>>> {
-	pub inner: TInner,
-	pub dummy: PhantomData<T>
-}
-impl<T, TInner: ColumnAppender<Arc<T>>> RcWrapperAppender<T, TInner> {
-	pub fn new(inner: TInner) -> Self {
-		Self { inner, dummy: PhantomData }
-	}
-}
-impl<T, TInner: ColumnAppender<Arc<T>>> ColumnAppenderBase for RcWrapperAppender<T, TInner> {
-	fn write_null(&mut self, repetition_index: &crate::level_index::LevelIndexList, level: i16) -> Result<usize, String> {
-		self.inner.write_null(repetition_index, level)
-	}
-
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn crate::column_pg_copier::DynamicSerializedWriter) -> Result<(), String> {
-		self.inner.write_columns(column_i, next_col)
-	}
-
-	fn max_dl(&self) -> i16 { self.inner.max_dl() }
-
-	fn max_rl(&self) -> i16 { self.inner.max_rl() }
-}
-impl<T: Clone, TInner: ColumnAppender<Arc<T>>> ColumnAppender<T> for RcWrapperAppender<T, TInner> {
-	fn copy_value(&mut self, repetition_index: &crate::level_index::LevelIndexList, value: Cow<T>) -> Result<usize, String> {
-		let arc = Arc::new(value.into_owned());
-		let cow = Cow::Owned(arc);
-		self.inner.copy_value(repetition_index, cow)
-	}
-}
-
 
 #[derive(Debug, Clone)]
 struct ColumnInfo {

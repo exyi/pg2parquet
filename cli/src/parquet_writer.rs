@@ -2,7 +2,7 @@ use std::{io::Write, cell::RefCell, sync::Arc, mem, borrow::Cow, rc::Rc};
 
 use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
 
-use crate::{column_pg_copier::{new_dynamic_serialized_writer, Arcell}, level_index::LevelIndexList, postgresutils::identify_row, column_appender::DynColumnAppender, pg_custom_types::PgAbstractRow, postgres_cloner::DynRowAppender};
+use crate::{level_index::LevelIndexList, postgresutils::identify_row, pg_custom_types::PgAbstractRow, postgres_cloner::DynRowAppender, appenders::{new_dynamic_serialized_writer, Arcell}};
 
 
 #[derive(Debug, Clone)]
@@ -18,16 +18,7 @@ pub struct WriterSettings {
 	pub row_group_row_limit: usize
 }
 
-
-pub trait ParquetRowWriter {
-	fn write_row(&mut self, row: Arc<postgres::Row>) -> Result<(), String>;
-
-	fn get_stats(&mut self) -> WriterStats;
-
-	fn close(self) -> Result<WriterStats, String>;
-}
-
-pub struct ParquetRowWriterImpl<W: Write> {
+pub struct ParquetRowWriter<W: Write> {
 	writer: SerializedFileWriter<W>,
 	schema: parquet::schema::types::TypePtr,
 	// row_group_writer: SerializedRowGroupWriter<'a, W>,
@@ -38,7 +29,7 @@ pub struct ParquetRowWriterImpl<W: Write> {
 	current_group_rows: usize
 }
 
-impl <W: Write> ParquetRowWriterImpl<W> {
+impl <W: Write> ParquetRowWriter<W> {
 	pub fn new(
 		writer: SerializedFileWriter<W>,
 		schema: parquet::schema::types::TypePtr,
@@ -46,7 +37,7 @@ impl <W: Write> ParquetRowWriterImpl<W> {
 		settings: WriterSettings
 	) -> parquet::errors::Result<Self> {
 		// let mut row_group_writer = writer.next_row_group()?;
-		Ok(ParquetRowWriterImpl {
+		Ok(ParquetRowWriter {
 			writer,
 			schema,
 			// row_group_writer,
@@ -77,10 +68,8 @@ impl <W: Write> ParquetRowWriterImpl<W> {
 
 		Ok(())
 	}
-}
 
-impl<W: Write> ParquetRowWriter for ParquetRowWriterImpl<W> {
-	fn write_row(&mut self, row: Arc<postgres::Row>) -> Result<(), String> {
+	pub fn write_row(&mut self, row: Arc<postgres::Row>) -> Result<(), String> {
 		let lvl = LevelIndexList::new_i(self.stats.rows);
 		let bytes = self.appender.copy_value(&lvl, Cow::Borrowed(&row))
 			.map_err(|e| format!("Could not copy Row[{}]:", identify_row(&row)) + &e)?;
@@ -97,9 +86,9 @@ impl<W: Write> ParquetRowWriter for ParquetRowWriterImpl<W> {
 		Ok(())
 	}
 
-	fn get_stats(&mut self) -> WriterStats { self.stats.clone() }
+	pub fn get_stats(&mut self) -> WriterStats { self.stats.clone() }
 
-	fn close(mut self) -> Result<WriterStats, String> {
+	pub fn close(mut self) -> Result<WriterStats, String> {
 		self.flush_group().map_err(|e| e)?;
 		// self.row_group_writer.close().map_err(|e| e.to_string())?;
 		self.writer.close().map_err(|e| e.to_string())?;

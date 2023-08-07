@@ -1,5 +1,8 @@
 {
 	"cSpell.words": [
 		"appender"
+	],
+	"rust-analyzer.linkedProjects": [
+		"./cli/Cargo.toml"
 	]
 }

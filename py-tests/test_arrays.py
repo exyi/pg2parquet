@@ -54,3 +54,37 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(pd_df["d"][2][0], Decimal("1.1"))
         self.assertEqual(pd_df["d"][2][1], None)
 
+    def test_ranges(self):
+        self.maxDiff = None
+        file = wrappers.create_and_export(
+            "arrays_ranges", "id",
+            "id int, simple_range int4range, rint_array int4range[], rnum_array numrange[], rts_array tsrange[]",
+            """
+                (1, '[1,2)', ARRAY['[1,2)'::int4range,'[2,3)'], ARRAY['[1.1,2.2)'::numrange,'[2.2,3.3)'], ARRAY['[2020-01-01 00:00:00,2020-01-02 00:00:00)'::tsrange,'[2020-01-02 00:00:00,2020-01-03 00:00:00)'::tsrange]),
+                (2, NULL, NULL, NULL, NULL),
+                (3, '(,2]', ARRAY[NULL::int4range, '(2,)', 'empty'], ARRAY['(1.1,)'::numrange,'(,)'], ARRAY[]::tsrange[])
+            """
+        )
+        def r(low, up, low_inc=True, up_inc=False, is_empty=False):
+            return {'lower': low, 'upper': up, 'lower_inclusive': low_inc, 'upper_inclusive': up_inc, 'is_empty': is_empty}
+        duckdb_table = duckdb.read_parquet(file).fetchall()
+        self.assertEqual(duckdb_table[0],
+            (1, r(1, 2),
+                [r(1, 2), r(2, 3)],
+                [r(Decimal('1.1'), Decimal('2.2')), r(Decimal('2.2'), Decimal('3.3'))],
+                [r(datetime.datetime(2020, 1, 1, 0, 0), datetime.datetime(2020, 1, 2, 0, 0)), r(datetime.datetime(2020, 1, 2, 0, 0), datetime.datetime(2020, 1, 3, 0, 0))])
+        )
+        self.assertEqual(duckdb_table[1], (2, None, None, None, None))
+        self.assertEqual(duckdb_table[2],
+            (3, r(None, 3, low_inc=False),
+                [None, r(3, None), r(None, None, is_empty=True, low_inc=False)],
+                [r(Decimal('1.1'), None, low_inc=False, up_inc=False), r(None, None, low_inc=False)],
+                [])
+        )
+
+        pl_df = pl.read_parquet(file)
+        self.assertEqual(pl_df["id"].to_list(), [1, 2, 3])
+        # TODO: polars is probably buggy with NULL struct
+        # self.assertEqual(pl_df["simple_range"].to_list(), [ r[1] for r in duckdb_table ])
+        # self.assertEqual(pl_df["rint_"].to_list(), [ r[2] for r in duckdb_table ])
+
