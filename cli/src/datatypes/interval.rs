@@ -7,8 +7,8 @@ use crate::myfrom::MyFrom;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PgInterval {
 	pub microseconds: i64,
-	pub day: i32,
-	pub month: i32
+	pub days: i32,
+	pub months: i32
 }
 
 impl<'a> FromSql<'a> for PgInterval {
@@ -16,7 +16,7 @@ impl<'a> FromSql<'a> for PgInterval {
 		let time = raw.read_i64::<BigEndian>()?;
 		let day = raw.read_i32::<BigEndian>()?;
 		let month = raw.read_i32::<BigEndian>()?;
-		Ok(PgInterval { microseconds: time, day, month })
+		Ok(PgInterval { microseconds: time, days: day, months: month })
 	}
 
 	fn accepts(ty: &postgres::types::Type) -> bool {
@@ -36,8 +36,8 @@ impl MyFrom<PgInterval> for FixedLenByteArray {
 		let days = millis_total / ms_per_day;
 		let millis = millis_total % ms_per_day;
 		let mut b = vec! [0u8; 12];
-		b[0..4].copy_from_slice(&i32::to_le_bytes(t.month));
-		b[4..8].copy_from_slice(&i32::to_le_bytes(t.day + days as i32));
+		b[0..4].copy_from_slice(&i32::to_le_bytes(t.months));
+		b[4..8].copy_from_slice(&i32::to_le_bytes(t.days + days as i32));
 		b[8..12].copy_from_slice(&i32::to_le_bytes(millis as i32));
 		FixedLenByteArray::from(b)
 	}

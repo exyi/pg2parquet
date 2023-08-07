@@ -175,7 +175,7 @@ class TestBasic(unittest.TestCase):
         file = wrappers.create_and_export(
             "interval_types", "id",
             "id int, interval interval",
-            "(1, '1 year 2 months 1 days 40 hours 5 mins 6 secs'), (2, NULL)"
+            "(1, '1 year 2 months 1 days 40 hours 5 mins 6 secs 1 microsecond'), (2, NULL)"
         )
 
         duckdb_table = duckdb.read_parquet(file).fetchall()
@@ -190,8 +190,26 @@ class TestBasic(unittest.TestCase):
             (1, '1 year 2 months 2 days 16:05:06'),
             (2, None)
         ])
+    def test_interval_struct(self):
+        file = wrappers.run_export(
+            "interval_types_struct",
+            "select * from interval_types order by id",
+            options=["--interval-handling=struct"]
+        )
 
-        # TODO: add option for exporting intervals differently, neither polars nor pandas support this
+        duckdb_table = duckdb.read_parquet(file).fetchall()
+        secperhour = 60 * 60
+        theobject = { "months": 14, "days": 1, "microseconds": 1000000 * (secperhour * 40 + 5 * 60 + 6) + 1 }
+        self.assertEqual(duckdb_table, [
+            (1, theobject ),
+            (2, None)
+        ])
+        
+        pd_df = pd.read_parquet(file)
+        self.assertEqual(pd_df["interval"][0], theobject)
+
+        pl_df = pl.read_parquet(file)
+        self.assertEqual(pl_df["interval"][0], theobject)
 
     def test_bits(self):
         file = wrappers.create_and_export(

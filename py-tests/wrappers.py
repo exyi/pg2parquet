@@ -97,7 +97,7 @@ def run_export(name, query = None, options = []) -> pyarrow.Table:
 
     return outfile
 
-def create_and_export(name, sort_column, schema, inserts):
+def create_and_export(name, sort_column, schema, inserts, options=[]):
     run_sql(f"CREATE TABLE {name} ({schema})")
     run_sql(f"INSERT INTO {name} VALUES {inserts}")
-    return run_export(name, f"SELECT * FROM {name} ORDER BY {sort_column} NULLS LAST")
+    return run_export(name, f"SELECT * FROM {name} ORDER BY {sort_column} NULLS LAST", options=options)

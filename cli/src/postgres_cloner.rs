@@ -17,7 +17,7 @@ use postgres::error::SqlState;
 use postgres::types::{Kind, Type as PgType, FromSql};
 use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
 use postgres::fallible_iterator::FallibleIterator;
-use parquet::schema::types::{Type as ParquetType, TypePtr};
+use parquet::schema::types::{Type as ParquetType, TypePtr, GroupTypeBuilder};
 
 use crate::PostgresConnArgs;
 use crate::appenders::{ColumnAppender, DynamicMergedAppender, RealMemorySize, ArrayColumnAppender, ColumnAppenderBase, GenericColumnAppender, BasicPgRowColumnAppender, RcWrapperAppender, StaticMergedAppender, new_autoconv_generic_appender, PreprocessExt, new_static_merged_appender};
@@ -37,6 +37,7 @@ pub struct SchemaSettings {
 	pub macaddr_handling: SchemaSettingsMacaddrHandling,
 	pub json_handling: SchemaSettingsJsonHandling,
 	pub enum_handling: SchemaSettingsEnumHandling,
+	pub interval_handling: SchemaSettingsIntervalHandling,
 	pub decimal_scale: i32,
 	pub decimal_precision: u32,
 }
@@ -59,12 +60,22 @@ pub enum SchemaSettingsJsonHandling {
 	Text
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
 pub enum SchemaSettingsEnumHandling {
-	/// Enum is stored as the postgres enum name
+	/// Enum is stored as the postgres enum name, Parquet LogicalType is set to ENUM
 	Text,
+	/// Enum is stored as the postgres enum name, Parquet LogicalType is set to String
+	PlainText,
 	/// Enum is stored as an 32-bit integer (zero-based index of the value in the enum definition)
 	Int
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum SchemaSettingsIntervalHandling {
+	/// Enum is stored as the Parquet INTERVAL type. This has lower precision than postgres interval (milliseconds instead of microseconds).
+	Interval,
+	/// Enum is stored as struct { months: i32, days: i32, microseconds: i64 }, exactly as PostgreSQL stores it.
+	Struct
 }
 
 pub fn default_settings() -> SchemaSettings {
@@ -72,6 +83,7 @@ pub fn default_settings() -> SchemaSettings {
 		macaddr_handling: SchemaSettingsMacaddrHandling::Text,
 		json_handling: SchemaSettingsJsonHandling::Text, // DuckDB doesn't load JSON converted type, so better to use string I guess
 		enum_handling: SchemaSettingsEnumHandling::Text,
+		interval_handling: SchemaSettingsIntervalHandling::Interval,
 		decimal_scale: 18,
 		decimal_precision: 38,
 	}
@@ -235,8 +247,14 @@ fn map_schema_column<Callback: AppenderCallback>(
 			match settings.enum_handling {
 				SchemaSettingsEnumHandling::Int =>
 					Ok(resolve_primitive::<PgEnum, Int32Type, _>(c.col_name(), c, callback, None, None)),
-				SchemaSettingsEnumHandling::Text =>
-					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, callback, Some(LogicalType::Enum), None)),
+				SchemaSettingsEnumHandling::Text | SchemaSettingsEnumHandling::PlainText => {
+					let logical_type = if settings.enum_handling == SchemaSettingsEnumHandling::Text {
+						LogicalType::Enum
+					} else {
+						LogicalType::String
+					};
+					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, callback, Some(logical_type), None))
+				},
 			}
 		Kind::Array(ref element_type) => {
 			let list_column = c.nest("list", 0).as_array();
@@ -402,7 +420,25 @@ fn map_simple_type<Callback: AppenderCallback>(
 			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, callback, Some(LogicalType::String), None),
 
 		"interval" =>
-			resolve_primitive_conv::<PgInterval, FixedLenByteArrayType, _, _>(name, c, callback, Some(12), None, Some(ConvertedType::INTERVAL), |v| MyFrom::my_from(v)),
+			match s.interval_handling {
+				SchemaSettingsIntervalHandling::Interval =>
+					resolve_primitive_conv::<PgInterval, FixedLenByteArrayType, _, _>(name, c, callback, Some(12), None, Some(ConvertedType::INTERVAL), |v| MyFrom::my_from(v)),
+				SchemaSettingsIntervalHandling::Struct => {
+					let t = GroupTypeBuilder::new(c.col_name())
+						.with_repetition(Repetition::OPTIONAL)
+						.with_fields(&mut vec![
+							Arc::new(ParquetType::primitive_type_builder("months", basic::Type::INT32).build().unwrap()),
+							Arc::new(ParquetType::primitive_type_builder("days", basic::Type::INT32).build().unwrap()),
+							Arc::new(ParquetType::primitive_type_builder("microseconds", basic::Type::INT64).build().unwrap()),
+						])
+						.build().unwrap();
+					let appender = new_static_merged_appender::<PgInterval>(c.definition_level + 1, c.repetition_level)
+						.add_appender_map(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.months))
+						.add_appender_map(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.days))
+						.add_appender_map(new_autoconv_generic_appender::<i64, Int64Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.microseconds));
+					(callback.f(c, appender), t)
+				},
+			},
 
 		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Aclitem Bpchar Timetz Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
 

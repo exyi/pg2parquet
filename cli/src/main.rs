@@ -3,7 +3,7 @@
 use std::{sync::Arc, path::PathBuf, process};
 
 use clap::{Parser, ValueEnum, Command};
-use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling, SchemaSettingsEnumHandling};
+use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling, SchemaSettingsEnumHandling, SchemaSettingsIntervalHandling};
 
 mod postgresutils;
 mod myfrom;
@@ -88,6 +88,9 @@ pub struct SchemaSettingsArgs {
     /// How to handle enum (Enumerated Type) columns 
     #[arg(long, hide_short_help = true, default_value = "text")]
     enum_handling: SchemaSettingsEnumHandling,
+    /// How to handle `interval` columns
+    #[arg(long, hide_short_help = true, default_value = "interval")]
+    interval_handling: SchemaSettingsIntervalHandling,
     /// How many decimal digits after the decimal point are stored in the Parquet file
     #[arg(long, hide_short_help = true, default_value_t = 18)]
 	decimal_scale: i32,
@@ -157,6 +160,7 @@ fn perform_export(args: ExportArgs) {
         macaddr_handling: args.schema_settings.macaddr_handling,
         json_handling: args.schema_settings.json_handling,
         enum_handling: args.schema_settings.enum_handling,
+        interval_handling: args.schema_settings.interval_handling,
         decimal_scale: args.schema_settings.decimal_scale,
         decimal_precision: args.schema_settings.decimal_precision,
     };

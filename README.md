@@ -52,11 +52,11 @@ You can also use environment variables `$PGPASSWORD` and `$PGUSER`
 ## Supported types
 
 * **Basic SQL types**: `text`, `char`, `varchar` and friends, all kinds of `int`s, `bool`, floating point numbers, `timestamp`, `timestamptz`, `date`, `time`, `uuid`
-  * `interval` - interval has lower precision in Parquet (ms) than in Postgres (µs), so the conversion is lossy
+  * `interval` - interval has lower precision in Parquet (ms) than in Postgres (µs), so the conversion is lossy. There is an option `--interval-handling=struct` which serializes it differently without rounding.
 * **Decimal numeric types**
 	* `numeric` will have fixed precision according to the `--decimal-scale` and `--decimal-precision` parameters
 	* `money` is always a 64-bit decimal with 2 decimal places
-* **`json` and `jsonb`**: by default serialized as a text field with the JSON. `--json-handling` option allows setting parquet metadata that the column is JSON, but the feature is not widely supported, thus it's disabled by default.
+* **`json` and `jsonb`**: by default serialized as a text field with the JSON. `--json-handling` option allows setting parquet LogicalType to [JSON](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md#json), but the feature is not widely supported, thus it's disabled by default.
 * **`xml`**: serialized as text
 * **`macaddr` and `inet`**: by default written out in text representation. It's possible to serialize macaddr as bytes or Int64 using `--macaddr-handling` option.
 * **`bit` and `varbit`**: represented as text of `0` and `1`
@@ -65,9 +65,8 @@ You can also use environment variables `$PGPASSWORD` and `$PGUSER`
 * **[Ranges](https://www.postgresql.org/docs/current/rangetypes.html)**
 	- Serialized as `struct { lower: T, upper: T, lower_inclusive: bool, upper_inclusive: bool, is_empty: bool }`
 * **[Arrays](https://www.postgresql.org/docs/current/arrays.html)**
-	- Serialized as parquet repeated fields
+	- Serialized as parquet List
 	- Always serialized as single-dimensional arrays, and information about starting index is dropped
-	- `NULL` is serialized as empty array (Parquet does not support NULL array without nesting it into another struct)
 * **[Composite Types](https://www.postgresql.org/docs/current/rowtypes.html)**
 	- Serialized as Parquet struct type
 
