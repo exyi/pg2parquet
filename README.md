@@ -120,6 +120,17 @@ Options:
       --password <PASSWORD>
           Password to use for the connection. It is recommended to use the PGPASSWORD environment variable instead, since process arguments are visible to other users on the system
 
+      --sslmode <SSLMODE>
+          Controls whether to use SSL/TLS to connect to the server
+
+          Possible values:
+          - disable:
+            Do not use TLS
+          - prefer:
+            Attempt to connect with TLS but allow sessions without (default behavior compiled with SSL support)
+          - require:
+            Require the use of TLS
+
       --macaddr-handling <MACADDR_HANDLING>
           How to handle `macaddr` columns
           
@@ -148,9 +159,22 @@ Options:
 
           Possible values:
           - text:
-            Enum is stored as the postgres enum name
+            Enum is stored as the postgres enum name, Parquet LogicalType is set to ENUM
+          - plain-text:
+            Enum is stored as the postgres enum name, Parquet LogicalType is set to String
           - int:
             Enum is stored as an 32-bit integer (zero-based index of the value in the enum definition)
+
+      --interval-handling <INTERVAL_HANDLING>
+          How to handle `interval` columns
+          
+          [default: interval]
+
+          Possible values:
+          - interval:
+            Enum is stored as the Parquet INTERVAL type. This has lower precision than postgres interval (milliseconds instead of microseconds)
+          - struct:
+            Enum is stored as struct { months: i32, days: i32, microseconds: i64 }, exactly as PostgreSQL stores it
 
       --decimal-scale <DECIMAL_SCALE>
           How many decimal digits after the decimal point are stored in the Parquet file
@@ -163,5 +187,4 @@ Options:
           [default: 38]
 
   -h, --help
-          Print help information (use `-h` for a summary)
-```
+          Print help information (use `-h` for a summary)```
