@@ -1,6 +1,7 @@
 use std::{sync::Arc, any::TypeId};
 
 use postgres::types::{FromSql, Kind, WrongType, Field};
+use postgres_protocol::types as pgtypes;
 
 fn read_pg_len(bytes: &[u8]) -> i32 {
 	let mut x = [0u8; 4];
@@ -37,6 +38,39 @@ impl<'a> FromSql<'a> for PgEnum {
 			_ => false
 		}
 	}
+}
+
+pub struct PgAny {
+	pub ty: postgres::types::Type,
+	pub value: Vec<u8>
+}
+impl<'a> FromSql<'a> for PgAny {
+	fn from_sql(ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+		match ty.kind() {
+			Kind::Array(_) => panic!("Nooo {}", ty),
+			_ => {}
+		};
+		Ok(PgAny {
+			ty: ty.clone(),
+			value: raw.to_vec()
+		})
+	}
+
+	fn accepts(_ty: &postgres::types::Type) -> bool { true }
+}
+pub struct PgAnyRef<'a> {
+	pub ty: postgres::types::Type,
+	pub value: &'a [u8]
+}
+impl<'b, 'a: 'b> FromSql<'a> for PgAnyRef<'b> {
+	fn from_sql(ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+		Ok(PgAnyRef {
+			ty: ty.clone(),
+			value: raw
+		})
+	}
+
+	fn accepts(_ty: &postgres::types::Type) -> bool { true }
 }
 
 #[derive(Debug)]
@@ -240,7 +274,16 @@ impl<'b> PgAbstractRow for PgRawRange {
     }
 }
 
-impl<'b> PgAbstractRow for PgRawRecord {
+fn hack_from_bool<'a, T: FromSql<'a>>(b: bool) -> T {
+	// println!("{}", WrongType::new::<T>(postgres::types::Type::BOOL.clone()));
+	if b {
+		T::from_sql_nullable(&postgres::types::Type::BOOL, Some(&[1])).unwrap()
+	} else {
+		T::from_sql_nullable(&postgres::types::Type::BOOL, Some(&[0])).unwrap()
+	}
+}
+
+impl PgAbstractRow for PgRawRecord {
     fn ab_get<'a, T: FromSql<'a>>(&'a self, index: usize) -> T {
 		// println!("ab_get: {:?} {:?}", index, &self);
 		let f = match self.ty.kind() {
@@ -268,11 +311,21 @@ impl<'b> PgAbstractRow for PgRawRecord {
     }
 }
 
-fn hack_from_bool<'a, T: FromSql<'a>>(b: bool) -> T {
-	// println!("{}", WrongType::new::<T>(postgres::types::Type::BOOL.clone()));
-	if b {
-		T::from_sql_nullable(&postgres::types::Type::BOOL, Some(&[1])).unwrap()
-	} else {
-		T::from_sql_nullable(&postgres::types::Type::BOOL, Some(&[0])).unwrap()
+
+impl PgAbstractRow for PgAny {
+	fn ab_get<'a, T: FromSql<'a>>(&'a self, index: usize) -> T {
+		debug_assert_eq!(0, index);
+		T::from_sql(&self.ty, &self.value).unwrap()
 	}
+
+	fn ab_len(&self) -> usize { 1 }
+}
+
+impl<'b> PgAbstractRow for PgAnyRef<'b> {
+	fn ab_get<'a, T: FromSql<'a>>(&'a self, index: usize) -> T {
+		debug_assert_eq!(0, index);
+		T::from_sql(&self.ty, &self.value).unwrap()
+	}
+
+	fn ab_len(&self) -> usize { 1 }
 }

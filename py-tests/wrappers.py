@@ -75,8 +75,7 @@ def run_export(name, query = None, options = []) -> pyarrow.Table:
         query_opt = ["--query", query]
     else:
         query_opt = ["--table", name]
-    r = subprocess.run([
-        pg2parquet_binary,
+    args = [
         "export",
         "--host", pg2parquet_host,
         "--port", pg2parquet_port,
@@ -85,7 +84,8 @@ def run_export(name, query = None, options = []) -> pyarrow.Table:
         *query_opt,
         "--output-file", outfile,
         *options
-    ], env={
+    ]
+    r = subprocess.run([ pg2parquet_binary, *args ], env={
         "PGPASSWORD": pg2parquet_password,
     }, capture_output=True)
     if r.returncode != 0:

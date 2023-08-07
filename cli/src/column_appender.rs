@@ -7,7 +7,7 @@ use parquet::{errors::ParquetError, file::writer::SerializedColumnWriter};
 use parquet::column::writer::{GenericColumnWriter, Level};
 use postgres::types::FromSql;
 
-use crate::column_pg_copier::DynamicSerializedWriter;
+use crate::column_pg_copier::{DynamicSerializedWriter, ColumnCopier};
 use crate::level_index::*;
 use crate::myfrom::MyFrom;
 
@@ -16,12 +16,15 @@ pub fn generic_column_appender_new_myfrom<TPg, TPq>(max_dl: i16, max_rl: i16) ->
 	GenericColumnAppender::new(max_dl, max_rl, |x| TPq::T::my_from(x))
 }
 
-pub trait ColumnAppender<TPg>: Clone {
+pub trait ColumnAppender<TPg> {
 	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: TPg) -> Result<usize, String>;
 	fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Option<TPg>) -> Result<usize, String> {
 		match value {
 			Some(value) => self.copy_value(repetition_index, value),
-			None => self.write_null(repetition_index, self.max_dl() - 1),
+			None => {
+				assert_ne!(self.max_dl(), 0);
+				self.write_null(repetition_index, self.max_dl() - 1)
+			},
 		}
 	}
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String>;
@@ -31,6 +34,8 @@ pub trait ColumnAppender<TPg>: Clone {
 	fn max_dl(&self) -> i16;
 	fn max_rl(&self) -> i16;
 }
+
+type DynColumnAppender<T> = Box<dyn ColumnAppender<T>>;
 
 pub struct GenericColumnAppender<TPg, TPq, FConversion>
 	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
@@ -49,6 +54,9 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
 
 	pub fn new(max_dl: i16, max_rl: i16, conversion: FConversion) -> Self {
+		if max_dl < 0 || max_rl < 0 {
+			panic!("Cannot create {} with max_dl={}, max_rl={}", std::any::type_name::<Self>(), max_dl, max_rl);
+		}
 		GenericColumnAppender {
 			max_dl, max_rl,
 			column: Vec::new(),
@@ -177,33 +185,34 @@ impl<TPg, TPq, FConversion> ColumnAppender<TPg> for GenericColumnAppender<TPg, T
 pub struct ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
 	inner: TInner,
-	dummy: PhantomData<TPg>,
+	dl: i16,
+	rl: i16,
+	allow_null: bool,
+	allow_element_null: bool,
+	_dummy: PhantomData<TPg>,
 	// dummy2: PhantomData<TPg>,
 }
 
 impl<TPg, TInner> ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
-	pub fn new(inner: TInner) -> Self {
-		ArrayColumnAppender { inner, dummy: PhantomData }
-	}
+	pub fn new(inner: TInner, allow_null: bool, allow_element_null: bool, dl: i16, rl: i16) -> Self {
+		if inner.max_rl() != rl + 1 {
+			panic!("Cannot create {}, repetition levels {} must be one less than inner repetition levels {}", std::any::type_name::<Self>(), rl, inner.max_rl());
+		}
+		if inner.max_dl() != dl + 1 + allow_element_null as i16 {
+			panic!("Cannot create {}, definition levels {} must be {} less than inner definition levels {}", std::any::type_name::<Self>(), dl, if allow_element_null { "one" } else { "two" }, inner.max_dl());
+		}
+		if dl < allow_null as i16 {
+			panic!("Cannot create {}, definition levels {} must be positive", std::any::type_name::<Self>(), dl);
+		}
+		if rl < 0 {
+			panic!("Cannot create {}, repetition levels {} must be positive", std::any::type_name::<Self>(), rl);
+		}
 
-	// fn max_dl(&self) -> i16 { self.inner.max_dl() }
+		ArrayColumnAppender { inner, allow_null, allow_element_null, dl, rl, _dummy: PhantomData }
+	}
 }
 
-impl<TPg, TInner> Clone for ArrayColumnAppender<TPg, TInner>
-	where TInner: ColumnAppender<TPg> {
-	fn clone(&self) -> Self {
-		ArrayColumnAppender { inner: self.inner.clone(), dummy: PhantomData }
-	}
-}
-
-// impl<TPg, TPq, FConversion> ArrayColumnAppender<TPg, GenericColumnAppender<TPg, TPq, TDataType>>
-// 	where TPq: Default + From<TPg> + RealMemorySize, TDataType: DataType<T = TPq> {
-// 	fn new_generic(max_dl: i16, max_rl: i16) -> Self
-// 		where TPq: Default, TDataType: DataType<T = TPq>, TPq: From<TPg> {
-// 		ArrayColumnAppender::new(GenericColumnAppender::<TPg, TPq, TDataType>::new(max_dl, max_rl + 1))
-// 	}
-// }
 
 impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg>,
@@ -215,36 +224,82 @@ impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg
 		let mut nested_ri = repetition_index.new_child();
 
 		for (_index, value) in array.into_iter().enumerate() {
-			bytes_written += self.inner.copy_value_opt(&nested_ri, value)?;
-
-			nested_ri.inc();
+			match value {
+				Some(value) => {
+					bytes_written += self.inner.copy_value(&nested_ri, value)?;
+					nested_ri.inc();
+				},
+				None => {
+					if self.allow_element_null {
+						debug_assert_eq!(self.dl + 1, self.inner.max_dl() - 1);
+						bytes_written += self.inner.write_null(&nested_ri, self.dl + 1)?;
+						nested_ri.inc();
+					} else {
+						// skip
+					}
+				}
+			}
 		}
 
-		// at least one element has to be there
 		if nested_ri.index == 0 {
-			bytes_written += self.inner.write_null(&nested_ri, self.inner.max_dl() - 1)?;
+			// empty array is written as null at DL=1
+			bytes_written += self.inner.write_null(&nested_ri, self.dl)?;
 		}
 		Ok(bytes_written)
 	}
 
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-		debug_assert!(level < self.inner.max_dl());
+		assert!(level <= self.dl);
 
 		let nested_ri = repetition_index.new_child();
-		if level == self.inner.max_dl() - 1 {
-			self.inner.write_null(&nested_ri, level)
-		} else {
-			self.inner.write_null(&nested_ri, level)
+		self.inner.write_null(&nested_ri, level)
+	}
+
+	fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Option<TArray>) -> Result<usize, String> {
+		match value {
+			Some(value) => self.copy_value(repetition_index, value),
+			None => {
+				let nested_ri = repetition_index.new_child();
+				self.inner.write_null(&nested_ri, self.dl - self.allow_null as i16)
+			},
 		}
 	}
 
-	fn max_dl(&self) -> i16 { self.inner.max_dl() }
-	fn max_rl(&self) -> i16 { self.inner.max_rl() - 1 }
+	fn max_dl(&self) -> i16 { self.dl }
+	fn max_rl(&self) -> i16 {
+		debug_assert!(self.inner.max_rl() > 0);
+		self.inner.max_rl() - 1
+	}
 
 	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
 		self.inner.write_columns(column_i, next_col)
 	}
 }
+
+
+pub struct WrapperColumnAppender<Row, Copier: ColumnCopier<Row>> { copier: Copier, _dummy: PhantomData<Row>, max_dl: i16, max_rl: i16 }
+impl<Row, Copier: ColumnCopier<Row>> WrapperColumnAppender<Row, Copier> {
+	pub fn new(copier: Copier, max_dl: i16, max_rl: i16) -> Self {
+		WrapperColumnAppender { copier: copier, _dummy: PhantomData, max_dl, max_rl }
+	}
+}
+impl<Row, Copier: ColumnCopier<Row>> ColumnAppender<Row> for WrapperColumnAppender<Row, Copier> {
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, row: Row) -> Result<usize, String> {
+		self.copier.copy_value(repetition_index, &row)
+	}
+
+	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		self.copier.write_null(repetition_index, level)
+	}
+
+	fn max_dl(&self) -> i16 { self.max_dl }
+	fn max_rl(&self) -> i16 { self.max_rl }
+
+	fn write_columns<'b>(&mut self, _column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
+		self.copier.write_columns(next_col)
+	}
+}
+
 
 pub trait RealMemorySize {
 	fn real_memory_size(&self) -> usize;

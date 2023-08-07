@@ -18,7 +18,7 @@ use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
 
 use crate::PostgresConnArgs;
-use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize};
+use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize, WrapperColumnAppender};
 use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
@@ -26,7 +26,7 @@ use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::new_decimal_bytes_appender;
 use crate::myfrom::{MyFrom, self};
 use crate::parquet_row_writer::{WriterStats, ParquetRowWriter, ParquetRowWriterImpl, WriterSettings};
-use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord};
+use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef};
 
 type DynCopier<TRow> = Box<dyn ColumnCopier<TRow>>;
 type DynRowCopier = DynCopier<Row>;
@@ -205,7 +205,7 @@ fn map_schema_root(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<
 
 		let t = c.type_();
 
-		let schema = map_schema_column(t, &ColumnInfo::root(col_i, c.name().to_owned()), s)?;
+		let schema = map_schema_column(t, &ColumnInfo::root(col_i, c.name().to_owned()), s, CreateCopierCallback::<Row>::new())?;
 		fields.push(schema)
 	}
 
@@ -221,31 +221,54 @@ fn map_schema_root(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<
 	Ok((merged_copier, struct_type))
 }
 
-fn map_schema_column<TRow: PgAbstractRow>(
+fn map_schema_column<Callback: AppenderCallback>(
 	t: &PgType,
 	c: &ColumnInfo,
-	s: &SchemaSettings
-) -> Result<ResolvedColumn<TRow>, String> {
+	settings: &SchemaSettings,
+	callback: Callback
+) -> Result<(Callback::TResult, ParquetType), String> {
 	match t.kind() {
 		Kind::Simple =>
-			map_simple_type(t, c, s, CreateCopierCallback::new()),
+			map_simple_type(t, c, settings, callback),
 		Kind::Enum(ref _enum_data) =>
-			match s.enum_handling {
+			match settings.enum_handling {
 				SchemaSettingsEnumHandling::Int =>
-					Ok(resolve_primitive::<PgEnum, Int32Type, _>(c.col_name(), c, CreateCopierCallback::new(), None, None)),
+					Ok(resolve_primitive::<PgEnum, Int32Type, _>(c.col_name(), c, callback, None, None)),
 				SchemaSettingsEnumHandling::Text =>
-					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, CreateCopierCallback::new(), Some(LogicalType::Enum), None)),
+					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, callback, Some(LogicalType::Enum), None)),
 			}
 		Kind::Array(ref element_type) => {
-			map_schema_column(element_type, &c.as_array(), s)
+			let list_column = c.nest("list", 0).as_array();
+			let element_column = list_column.nest("element", 0);
+
+			let (element_copier, element_schema) = map_schema_column(element_type, &element_column, settings, CreateCopierCallback::<PgAny>::new())?;
+			
+			debug_assert_eq!(element_schema.name(), "element");
+			let list_schema = ParquetType::group_type_builder("list")
+				.with_repetition(Repetition::REPEATED)
+				.with_fields(&mut vec![
+					Arc::new(element_schema)
+				])
+				.build().unwrap();
+
+			let schema = ParquetType::group_type_builder(c.col_name())
+				.with_logical_type(Some(LogicalType::List))
+				.with_repetition(c.pq_repetition())
+				.with_fields(&mut vec![
+					Arc::new(list_schema)
+				])
+				.build().unwrap();
+			let copier = create_array_copier(element_copier, &c, element_column.definition_level + 1, element_column.repetition_level, callback);
+			// map_schema_column(element_type, &c.as_array(), s)
+			Ok((copier, schema))
 		},
 		Kind::Domain(ref element_type) => {
-			map_schema_column(element_type, c, s)
+			map_schema_column(element_type, c, settings, callback)
 		},
 		&Kind::Range(ref element_type) => {
 			// cc.repetition_level += c.is_array as i16;
-			let col_lower = map_schema_column(element_type, &c.nest("lower", 0), s)?;
-			let col_upper = map_schema_column(element_type, &c.nest("upper", 1), s)?;
+			let col_lower = map_schema_column(element_type, &c.nest("lower", 0), settings, CreateCopierCallback::<PgRawRange>::new())?;
+			let col_upper = map_schema_column(element_type, &c.nest("upper", 1), settings, CreateCopierCallback::<PgRawRange>::new())?;
 			let col_lower_incl = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest("lower_inclusive", 2));
 			let col_upper_incl = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest("upper_inclusive", 3));
 			let col_is_empty = create_primitive_copier_simple::<bool, BoolType, _>(&c.nest("is_empty", 4));
@@ -262,7 +285,7 @@ fn map_schema_column<TRow: PgAbstractRow>(
 				.build()
 				.unwrap();
 
-			let copier = create_complex_appender::<PgRawRange, _>(c, CreateCopierCallback::<TRow>::new(), vec![
+			let copier = create_complex_appender::<PgRawRange, _>(c, callback, vec![
 				col_lower.0,
 				col_upper.0,
 				col_lower_incl,
@@ -275,7 +298,7 @@ fn map_schema_column<TRow: PgAbstractRow>(
 		&Kind::Composite(ref fields) => {
 			let (mut column_copiers, mut parquet_types) = (vec![], vec![]);
 			for (i, f) in fields.into_iter().enumerate() {
-				let (c, t) = map_schema_column::<PgRawRecord>(f.type_(), &c.nest(f.name(), i), s)?;
+				let (c, t) = map_schema_column(f.type_(), &c.nest(f.name(), i), settings, CreateCopierCallback::new())?;
 				column_copiers.push(c);
 				parquet_types.push(t);
 			}
@@ -286,7 +309,7 @@ fn map_schema_column<TRow: PgAbstractRow>(
 				.build()
 				.unwrap();
 
-			let copier = create_complex_appender::<PgRawRecord, _>(c, CreateCopierCallback::<TRow>::new(), column_copiers);
+			let copier = create_complex_appender::<PgRawRecord, _>(c, callback, column_copiers);
 
 			Ok((copier, schema))
 		}
@@ -445,10 +468,20 @@ fn create_complex_appender<T: for <'a> FromSql<'a> + 'static, Callback: Appender
 
 fn wrap_appender<T: for <'a> FromSql<'a> + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, appender: impl ColumnAppender<T> + 'static) -> Callback::TResult {
 	if c.is_array {
-		callback.f::<Vec<Option<T>>, _>(c, ArrayColumnAppender::new(appender))
+		let dl = appender.max_dl() - 1;
+		let rl = appender.max_rl() - 1;
+		callback.f::<Vec<Option<T>>, _>(c, ArrayColumnAppender::new(appender, false, false, dl, rl))
 	} else {
 		callback.f(c, appender)
 	}
+}
+
+fn create_array_copier<Callback: AppenderCallback>(inner: DynCopier<PgAny>, c: &ColumnInfo, inner_max_dl: i16, inner_max_rl: i16, callback: Callback) -> Callback::TResult {
+	let appender = WrapperColumnAppender::<PgAny, DynCopier<PgAny>>::new(inner, inner_max_dl, inner_max_rl);
+	let outer_dl = c.definition_level + 1;
+	debug_assert_eq!(outer_dl, inner_max_dl);
+	let array_appender = ArrayColumnAppender::new(appender, true, true, outer_dl, c.repetition_level);
+	callback.f::<Vec<Option<PgAny>>, _>(c, array_appender)
 }
 
 #[derive(Debug, Clone)]
@@ -526,16 +559,6 @@ impl<TRow: PgAbstractRow> AppenderCallback for CreateCopierCallback<TRow> {
 		Box::new(BasicPgColumnCopier::new(c.col_i, appender))
 	}
 }
-// struct CreateRangeCpCallback<TInner: AppenderCallback> { inner: TInner }
-// impl<TInner: AppenderCallback> AppenderCallback for CreateRangeCpCallback<TInner> {
-// 	type TResult = TInner::TResult;
-// 	fn f<TPg, TAppender>(&self, c: &ColumnInfo, appender: TAppender) -> TInner::TResult
-// 		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + 'static {
-
-// 		let range_appender = RangeColumnAppender::new(appender);
-// 		self.inner.f::<PgRawRange<TPg>, _>(c, range_appender)
-// 	}
-// }
 
 struct NopCallback { }
 impl AppenderCallback for NopCallback {

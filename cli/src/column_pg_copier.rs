@@ -50,6 +50,20 @@ pub fn copier_write_columns<'a, 'b: 'a, W: Write, TReader, C: ColumnCopier<TRead
 	s.write_columns(dynamic_writer.as_mut())
 }
 
+impl<T> ColumnCopier<T> for Box<dyn ColumnCopier<T>> {
+    fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: &T) -> Result<usize, String> {
+        self.as_mut().copy_value(repetition_index, reader)
+    }
+
+    fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+        self.as_mut().write_null(repetition_index, level)
+    }
+
+    fn write_columns<'b>(&mut self, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
+        self.as_mut().write_columns(next_col)
+    }
+}
+
 
 pub struct BasicPgColumnCopier<TPg, TAppender>
 	where TAppender: ColumnAppender<TPg> {
