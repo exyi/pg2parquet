@@ -3,6 +3,7 @@ use postgres::types::FromSql;
 
 use crate::myfrom::MyFrom;
 
+#[derive(Debug, Clone)]
 pub struct PgMoney {
 	pub amount: i64
 }

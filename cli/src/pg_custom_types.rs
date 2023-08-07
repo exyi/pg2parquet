@@ -9,6 +9,7 @@ fn read_pg_len(bytes: &[u8]) -> i32 {
 	return i32::from_be_bytes(x);
 }
 
+#[derive(Debug, Clone)]
 pub struct PgEnum {
 	pub name: String,
 	pub case: i64
@@ -40,6 +41,7 @@ impl<'a> FromSql<'a> for PgEnum {
 	}
 }
 
+#[derive(Debug, Clone)]
 pub struct PgAny {
 	pub ty: postgres::types::Type,
 	pub value: Vec<u8>
@@ -73,7 +75,7 @@ impl<'b, 'a: 'b> FromSql<'a> for PgAnyRef<'b> {
 	fn accepts(_ty: &postgres::types::Type) -> bool { true }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PgRawRange {
 	pub element_type: postgres::types::Type,
 	pub lower: Option<Vec<u8>>,
@@ -168,7 +170,7 @@ impl<'a> FromSql<'a> for PgRawRange {
 		}
 	}
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PgRawRecord {
 	pub ty: postgres::types::Type,
 	data: Vec<u8>,

@@ -1,10 +1,12 @@
+use std::borrow::Cow;
+
 use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal};
 
 use crate::{column_appender::{ColumnAppender, GenericColumnAppender, ColumnAppenderBase}, level_index::LevelIndexList, column_pg_copier::DynamicSerializedWriter, myfrom::MyFrom};
 
 
-fn convert_decimal_to_bytes(d: BigDecimal, scale: i32, precision: u32) -> Vec<u8> {
+fn convert_decimal_to_bytes(d: &BigDecimal, scale: i32, precision: u32) -> Vec<u8> {
 	let dd = d.with_prec(precision as u64).with_scale(scale as i64);
 	let (int, exp) = dd.into_bigint_and_exponent();
 	debug_assert_eq!(exp, scale as i64);
@@ -39,8 +41,12 @@ impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppenderBase for DecimalBytesAppende
 }
 
 impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppender<PgNumeric> for DecimalBytesAppender<TInner> {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: PgNumeric) -> Result<usize, String> {
-		let bytes = value.n.map(|n| convert_decimal_to_bytes(n, self.scale, self.precision));
-		self.inner.copy_value_opt(repetition_index, bytes)
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<PgNumeric>) -> Result<usize, String> {
+		let value = value.as_ref();
+		let bytes = match &value.n {
+			Some(n) => Some(convert_decimal_to_bytes(n, self.scale, self.precision)),
+			None => None,
+		};
+		self.inner.copy_value_opt(repetition_index, Cow::Owned(bytes))
 	}
 }

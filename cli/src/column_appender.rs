@@ -26,12 +26,13 @@ pub trait ColumnAppenderBase {
 	fn max_rl(&self) -> i16;
 }
 
-pub trait ColumnAppender<TPg>: ColumnAppenderBase {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: TPg) -> Result<usize, String>;
-	fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Option<TPg>) -> Result<usize, String> {
+pub trait ColumnAppender<TPg: Clone>: ColumnAppenderBase {
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String>;
+	fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Cow<Option<TPg>>) -> Result<usize, String> {
 		match value {
-			Some(value) => self.copy_value(repetition_index, value),
-			None => {
+			Cow::Owned(Some(value)) => self.copy_value(repetition_index, Cow::<TPg>::Owned(value)),
+			Cow::Borrowed(Some(value)) => self.copy_value(repetition_index, Cow::Borrowed(value)),
+			Cow::Owned(None) | Cow::Borrowed(None) => {
 				assert_ne!(self.max_dl(), 0);
 				self.write_null(repetition_index, self.max_dl() - 1)
 			},
@@ -59,8 +60,8 @@ impl<T> ColumnAppenderBase for DynColumnAppender<T> {
     }
 }
 
-impl<T> ColumnAppender<T> for DynColumnAppender<T> {
-    fn copy_value(&mut self, repetition_index: &LevelIndexList, value: T) -> Result<usize, String> {
+impl<T: Clone> ColumnAppender<T> for DynColumnAppender<T> {
+    fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<T>) -> Result<usize, String> {
         self.as_mut().copy_value(repetition_index, value)
     }
 }
@@ -199,10 +200,10 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TP
 	fn max_rl(&self) -> i16 { self.max_rl }
 }
 
-impl<TPg, TPq, FConversion> ColumnAppender<TPg> for GenericColumnAppender<TPg, TPq, FConversion>
+impl<TPg: Clone, TPq, FConversion> ColumnAppender<TPg> for GenericColumnAppender<TPg, TPq, FConversion>
 	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: TPg) -> Result<usize, String> {
-		let pq_value = self.convert(value);
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
+		let pq_value = self.convert(value.into_owned());
 		let byte_size = pq_value.real_memory_size();
 		self.column.push(pq_value);
 		if self.max_dl > 0 {
@@ -219,7 +220,7 @@ impl<TPg, TPq, FConversion> ColumnAppender<TPg> for GenericColumnAppender<TPg, T
 	}
 }
 
-pub struct ArrayColumnAppender<TPg, TInner>
+pub struct ArrayColumnAppender<TPg: Clone, TInner>
 	where TInner: ColumnAppender<TPg> {
 	inner: TInner,
 	dl: i16,
@@ -230,7 +231,7 @@ pub struct ArrayColumnAppender<TPg, TInner>
 	// dummy2: PhantomData<TPg>,
 }
 
-impl<TPg, TInner> ArrayColumnAppender<TPg, TInner>
+impl<TPg: Clone, TInner> ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
 	pub fn new(inner: TInner, allow_null: bool, allow_element_null: bool, dl: i16, rl: i16) -> Self {
 		if inner.max_rl() != rl + 1 {
@@ -250,7 +251,7 @@ impl<TPg, TInner> ArrayColumnAppender<TPg, TInner>
 	}
 }
 
-impl<TPg, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner> 
+impl<TPg: Clone, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner> 
 	where TInner: ColumnAppender<TPg> {
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		assert!(level <= self.dl);
@@ -270,19 +271,19 @@ impl<TPg, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner>
 	}	
 }
 
-impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
+impl<'a, TPg: Clone, TInner, TArray: Clone> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg>,
-		  TArray: IntoIterator<Item = Option<TPg>> {
+		  TArray: IntoIterator<Item = Option<TPg>> + Clone {
 
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, array: TArray) -> Result<usize, String> {
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, array: Cow<TArray>) -> Result<usize, String> {
 		let mut bytes_written = 0;
 
 		let mut nested_ri = repetition_index.new_child();
 
-		for (_index, value) in array.into_iter().enumerate() {
+		for (_index, value) in array.into_owned().into_iter().enumerate() {
 			match value {
 				Some(value) => {
-					bytes_written += self.inner.copy_value(&nested_ri, value)?;
+					bytes_written += self.inner.copy_value(&nested_ri, Cow::Owned(value))?;
 					nested_ri.inc();
 				},
 				None => {
@@ -304,10 +305,11 @@ impl<'a, TPg, TInner, TArray> ColumnAppender<TArray> for ArrayColumnAppender<TPg
 		Ok(bytes_written)
 	}
 
-	fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Option<TArray>) -> Result<usize, String> {
+	fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Cow<Option<TArray>>) -> Result<usize, String> {
 		match value {
-			Some(value) => self.copy_value(repetition_index, value),
-			None => {
+			Cow::Owned(Some(value)) => self.copy_value(repetition_index, Cow::<TArray>::Owned(value)),
+			Cow::Borrowed(Some(value)) => self.copy_value(repetition_index, Cow::Borrowed(value)),
+			Cow::Owned(None) | Cow::Borrowed(None) => {
 				let nested_ri = repetition_index.new_child();
 				self.inner.write_null(&nested_ri, self.dl - self.allow_null as i16)
 			},

@@ -3,6 +3,7 @@ use postgres::types::{FromSql, Type};
 
 use crate::myfrom::MyFrom;
 
+#[derive(Debug, Clone)]
 pub struct PgRawJsonb {
 	pub data: String,
 }
