@@ -127,8 +127,12 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 		pg_config.password(&read_password(pg_config.get_user().unwrap())?.trim());
 	}
 
-	#[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64"))))]
-	match args.sslmode {
+	#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64")))))]
+	match &args.sslmode {
+		None | Some(crate::SslMode::Disable) => {},
+		Some(x) => return Err(format!("SSL/TLS is disabled in this build of pg2parquet, so ssl mode {:?} cannot be used. Only 'disable' option is allowed.", x)),
+	}
+	match &args.sslmode {
 		None => {},
 		Some(crate::SslMode::Disable) => {
 			pg_config.ssl_mode(postgres::config::SslMode::Disable);

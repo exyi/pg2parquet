@@ -86,7 +86,6 @@ pub struct PostgresConnArgs {
     #[arg(long)]
     password: Option<String>,
     /// Controls whether to use SSL/TLS to connect to the server.
-    #[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64"))))]
     #[arg(long="sslmode", alias="tlsmode", alias="ssl-mode", alias="tls-mode")]
     sslmode: Option<SslMode>,
 }
