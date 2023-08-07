@@ -126,6 +126,18 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 	} else {
 		pg_config.password(&read_password(pg_config.get_user().unwrap())?.trim());
 	}
+	match args.sslmode {
+		None => {},
+		Some(crate::SslMode::Disable) => {
+			pg_config.ssl_mode(postgres::config::SslMode::Disable);
+		},
+		Some(crate::SslMode::Prefer) => {
+			pg_config.ssl_mode(postgres::config::SslMode::Prefer);
+		},
+		Some(crate::SslMode::Require) => {
+			pg_config.ssl_mode(postgres::config::SslMode::Require);
+		},
+	}
 
 	let connector = build_tls_connector()?;
 

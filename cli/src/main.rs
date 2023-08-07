@@ -60,6 +60,16 @@ struct ExportArgs {
     schema_settings: SchemaSettingsArgs,
 }
 
+#[derive(clap::ValueEnum, Debug, Clone)]
+enum SslMode {
+    /// Do not use TLS.
+    Disable,
+    /// Attempt to connect with TLS but allow sessions without (default behavior compiled with SSL support).
+    Prefer,
+    /// Require the use of TLS.
+    Require,
+}
+
 #[derive(clap::Args, Debug, Clone)]
 pub struct PostgresConnArgs {
     /// Database server host
@@ -75,6 +85,10 @@ pub struct PostgresConnArgs {
     /// Password to use for the connection. It is recommended to use the PGPASSWORD environment variable instead, since process arguments are visible to other users on the system.
     #[arg(long)]
     password: Option<String>,
+    /// Controls whether to use SSL/TLS to connect to the server.
+    #[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64"))))]
+    #[arg(long="sslmode", alias="tlsmode", alias="ssl-mode", alias="tls-mode")]
+    sslmode: Option<SslMode>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
