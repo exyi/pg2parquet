@@ -305,7 +305,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 
 	Ok(match t.name() {
 		"bool" => resolve_primitive::<bool, BoolType, _>(name, c, callback, None, None),
-		"int2" => resolve_primitive::<i16, Int32Type, _>(name, c, callback, None, Some(ConvertedType::INT_16)),
+		"int2" => resolve_primitive::<i16, Int32Type, _>(name, c, callback, Some(LogicalType::Integer { bit_width: 16, is_signed: true }), None),
 		"int4" => resolve_primitive::<i32, Int32Type, _>(name, c, callback, None, None),
 		"oid" => resolve_primitive::<u32, Int32Type, _>(name, c, callback, Some(LogicalType::Integer { bit_width: 32, is_signed: false }), None),
 		"int8" => resolve_primitive::<i64, Int64Type, _>(name, c, callback, None, None),
@@ -329,10 +329,10 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
 			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
 		"jsonb" | "json" =>
-			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, callback, None, Some(match s.json_handling {
-				SchemaSettingsJsonHandling::Text => ConvertedType::UTF8,
-				SchemaSettingsJsonHandling::TextMarkedAsJson => ConvertedType::JSON
-			})),
+			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, callback, Some(match s.json_handling {
+				SchemaSettingsJsonHandling::Text => LogicalType::String,
+				SchemaSettingsJsonHandling::TextMarkedAsJson => LogicalType::Json
+			}), None),
 		"timestamptz" =>
 			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, callback, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: true, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
 		"timestamp" =>
@@ -348,16 +348,16 @@ fn map_simple_type<Callback: AppenderCallback>(
 		"macaddr" =>
 			match s.macaddr_handling {
 				SchemaSettingsMacaddrHandling::Text =>
-					resolve_primitive::<eui48::MacAddress, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
+					resolve_primitive::<eui48::MacAddress, ByteArrayType, _>(name, c, callback, Some(LogicalType::String), None),
 				SchemaSettingsMacaddrHandling::ByteArray =>
 					resolve_primitive_conv::<eui48::MacAddress, FixedLenByteArrayType, _, _>(name, c, callback, Some(6), None, None, |v| MyFrom::my_from(v)),
 				SchemaSettingsMacaddrHandling::Int64 =>
 					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, callback, None, None),
 			},
 		"inet" =>
-			resolve_primitive::<IpAddr, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
+			resolve_primitive::<IpAddr, ByteArrayType, _>(name, c, callback, Some(LogicalType::String), None),
 		"bit" | "varbit" =>
-			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
+			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, callback, Some(LogicalType::String), None),
 
 		"interval" =>
 			resolve_primitive_conv::<PgInterval, FixedLenByteArrayType, _, _>(name, c, callback, Some(12), None, Some(ConvertedType::INTERVAL), |v| MyFrom::my_from(v)),
