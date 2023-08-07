@@ -70,7 +70,7 @@ enum SslMode {
     Require,
 }
 
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Clone)]
 pub struct PostgresConnArgs {
     /// Database server host
     #[arg(short='H', long)]
@@ -89,6 +89,13 @@ pub struct PostgresConnArgs {
     #[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64"))))]
     #[arg(long="sslmode", alias="tlsmode", alias="ssl-mode", alias="tls-mode")]
     sslmode: Option<SslMode>,
+}
+
+impl std::fmt::Debug for PostgresConnArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let password = self.password.as_ref().map(|_| "********");
+        f.debug_struct("PostgresConnArgs").field("host", &self.host).field("user", &self.user).field("dbname", &self.dbname).field("port", &self.port).field("password", &password).field("sslmode", &self.sslmode).finish()
+    }
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -135,7 +142,10 @@ fn handle_result<T, TErr: ToString>(r: Result<T, TErr>) -> T {
         Ok(v) => v,
         Err(e) => {
             let args = CliCommand::try_parse();
-            eprintln!("Error occured while executing command {:?}", args.ok());
+            match args.ok() {
+                Some(a) => eprintln!("Error occured while executing command {:#?}", a),
+                None => eprintln!("Error occured while executing an unparsable command"),
+            };
             eprintln!();
             eprintln!("{}", e.to_string());
             process::exit(1);
