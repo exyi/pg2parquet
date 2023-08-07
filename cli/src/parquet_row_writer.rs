@@ -1,8 +1,8 @@
-use std::{io::Write, cell::RefCell, sync::Arc, mem};
+use std::{io::Write, cell::RefCell, sync::Arc, mem, borrow::Cow, rc::Rc};
 
 use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
 
-use crate::{column_pg_copier::{ColumnCopier, new_dynamic_serialized_writer, Arcell}, level_index::LevelIndexList, postgresutils::identify_row};
+use crate::{column_pg_copier::{new_dynamic_serialized_writer, Arcell}, level_index::LevelIndexList, postgresutils::identify_row, column_appender::DynColumnAppender, pg_custom_types::PgAbstractRow, postgres_cloner::DynRowCopier};
 
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub struct WriterSettings {
 
 
 pub trait ParquetRowWriter {
-	fn write_row(&mut self, row: &postgres::Row) -> Result<(), String>;
+	fn write_row(&mut self, row: Arc<postgres::Row>) -> Result<(), String>;
 
 	fn get_stats(&mut self) -> WriterStats;
 
@@ -31,9 +31,8 @@ pub struct ParquetRowWriterImpl<W: Write> {
 	writer: SerializedFileWriter<W>,
 	schema: parquet::schema::types::TypePtr,
 	// row_group_writer: SerializedRowGroupWriter<'a, W>,
-	copier: Box<dyn ColumnCopier<postgres::Row>>,
+	copier: DynRowCopier<postgres::Row>,
 	stats: WriterStats,
-	batch_buffer: Vec<postgres::Row>,
 	settings: WriterSettings,
 	current_group_bytes: usize,
 	current_group_rows: usize
@@ -43,7 +42,7 @@ impl <W: Write> ParquetRowWriterImpl<W> {
 	pub fn new(
 		writer: SerializedFileWriter<W>,
 		schema: parquet::schema::types::TypePtr,
-		copier: Box<dyn ColumnCopier<postgres::Row>>,
+		copier: DynRowCopier<postgres::Row>,
 		settings: WriterSettings
 	) -> parquet::errors::Result<Self> {
 		// let mut row_group_writer = writer.next_row_group()?;
@@ -53,7 +52,6 @@ impl <W: Write> ParquetRowWriterImpl<W> {
 			// row_group_writer,
 			copier,
 			stats: WriterStats { rows: 0, bytes: 0, groups: 0 },
-			batch_buffer: Vec::new(),
 			settings,
 			current_group_bytes: 0,
 			current_group_rows: 0
@@ -65,7 +63,7 @@ impl <W: Write> ParquetRowWriterImpl<W> {
 		let row_group_writer: Arcell<_> = Arc::new(RefCell::new(Some(row_group_writer)));
 		let mut dyn_writer = new_dynamic_serialized_writer(row_group_writer.clone());
 
-		self.copier.write_columns(dyn_writer.as_mut())?;
+		self.copier.write_columns(0, dyn_writer.as_mut())?;
 
 		mem::drop(dyn_writer);
 		let hack123 = RefCell::new(None);
@@ -82,10 +80,10 @@ impl <W: Write> ParquetRowWriterImpl<W> {
 }
 
 impl<W: Write> ParquetRowWriter for ParquetRowWriterImpl<W> {
-	fn write_row(&mut self, row: &postgres::Row) -> Result<(), String> {
+	fn write_row(&mut self, row: Arc<postgres::Row>) -> Result<(), String> {
 		let lvl = LevelIndexList::new_i(self.stats.rows);
-		let bytes = self.copier.copy_value(&lvl, row)
-			.map_err(|e| format!("Could not copy Row[{}]:", identify_row(row)) + &e)?;
+		let bytes = self.copier.copy_value(&lvl, Cow::Borrowed(&row))
+			.map_err(|e| format!("Could not copy Row[{}]:", identify_row(&row)) + &e)?;
 
 		self.current_group_bytes += bytes;
 		self.current_group_rows += 1;

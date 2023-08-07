@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::io::{self, Write};
 use std::marker::PhantomData;
@@ -18,8 +19,8 @@ use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
 
 use crate::PostgresConnArgs;
-use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize, WrapperColumnAppender};
-use crate::column_pg_copier::{ColumnCopier, BasicPgColumnCopier, MergedColumnCopier};
+use crate::column_appender::{ColumnAppender, GenericColumnAppender, ArrayColumnAppender, RealMemorySize, DynColumnAppender, ColumnAppenderBase};
+use crate::column_pg_copier::{MergedColumnAppender, BasicPgRowColumnAppender};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
@@ -28,9 +29,8 @@ use crate::myfrom::{MyFrom, self};
 use crate::parquet_row_writer::{WriterStats, ParquetRowWriter, ParquetRowWriterImpl, WriterSettings};
 use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef};
 
-type DynCopier<TRow> = Box<dyn ColumnCopier<TRow>>;
-type DynRowCopier = DynCopier<Row>;
-type ResolvedColumn<TRow> = (DynCopier<TRow>, ParquetType);
+pub type DynRowCopier<TRow> = Box<dyn for<'a> ColumnAppender<Cow<'a, Arc<TRow>>>>;
+type ResolvedColumn<TRow> = (DynRowCopier<TRow>, ParquetType);
 
 #[derive(Clone, Debug)]
 pub struct SchemaSettings {
@@ -142,8 +142,9 @@ pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathB
 	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[]).unwrap();
 	for row in rows.iterator() {
 		let row = row.map_err(|err| err.to_string())?;
+		let row = Arc::new(row);
 
-		row_writer.write_row(&row)?;
+		row_writer.write_row(row)?;
 	}
 
 	Ok(row_writer.close()?)
@@ -199,7 +200,7 @@ fn count_columns(p: &ParquetType) -> usize {
 }
 
 
-fn map_schema_root(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<Row>, String> {
+fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<Row>, String> {
 	let mut fields: Vec<ResolvedColumn<Row>> = vec![];
 	for (col_i, c) in row.iter().enumerate() {
 
@@ -212,7 +213,7 @@ fn map_schema_root(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<
 
 	let (column_copiers, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
 
-	let merged_copier: Box<dyn ColumnCopier<Row>> = Box::new(MergedColumnCopier::<Row>::new(column_copiers, 0, 0));
+	let merged_copier: DynRowCopier<Row> = Box::new(MergedColumnAppender::new(column_copiers, 0, 0));
 	let struct_type = ParquetType::group_type_builder("root")
 		.with_fields(&mut parquet_types.into_iter().map(Arc::new).collect())
 		.build()
@@ -258,7 +259,9 @@ fn map_schema_column<Callback: AppenderCallback>(
 					Arc::new(list_schema)
 				])
 				.build().unwrap();
-			let copier = create_array_copier(element_copier, &c, element_column.definition_level + 1, element_column.repetition_level, callback);
+			assert_eq!(element_copier.max_dl(), element_column.definition_level + 1);
+			assert_eq!(element_copier.max_rl(), element_column.repetition_level);
+			let copier = create_array_copier(element_copier, &c, callback);
 			// map_schema_column(element_type, &c.as_array(), s)
 			Ok((copier, schema))
 		},
@@ -343,7 +346,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 				.with_scale(scale)
 				.build().unwrap();
 			let cp = {
-    let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
+	let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
 	callback.f(c, appender)
 };
 			(cp, schema)
@@ -445,7 +448,7 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + 'static, TDataType, FConversi
 }
 fn create_primitive_copier_simple<T: for <'a> FromSql<'a> + 'static, TDataType, TRow: PgAbstractRow>(
 	c: &ColumnInfo,
-) -> DynCopier<TRow>
+) -> DynRowCopier<TRow>
 	where TDataType: DataType, TDataType::T: RealMemorySize + MyFrom<T> {
 	let mut c = c.clone();
 	c.definition_level += 1;
@@ -462,18 +465,44 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType, FConv
 	callback.f(c, basic_appender)
 }
 
-fn create_complex_appender<T: for <'a> FromSql<'a> + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, copiers: Vec<DynCopier<T>>) -> Callback::TResult {
-	let main_cp = MergedColumnCopier::new(copiers, c.definition_level + 1, c.repetition_level);
-	callback.f(c, main_cp)
+fn create_complex_appender<T: for <'a> FromSql<'a> + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, copiers: Vec<DynRowCopier<T>>) -> Callback::TResult {
+	let main_cp = MergedColumnAppender::new(copiers, c.definition_level + 1, c.repetition_level);
+	let unwrapped = CowWrapperAppender { inner: Box::new(main_cp) };
+	callback.f(c, unwrapped)
 }
 
-fn create_array_copier<Callback: AppenderCallback>(inner: DynCopier<PgAny>, c: &ColumnInfo, inner_max_dl: i16, inner_max_rl: i16, callback: Callback) -> Callback::TResult {
-	let appender = WrapperColumnAppender::<PgAny, DynCopier<PgAny>>::new(inner, inner_max_dl, inner_max_rl);
+fn create_array_copier<Callback: AppenderCallback>(inner: DynRowCopier<PgAny>, c: &ColumnInfo, callback: Callback) -> Callback::TResult {
 	let outer_dl = c.definition_level + 1;
-	debug_assert_eq!(outer_dl + 2, inner_max_dl);
-	let array_appender = ArrayColumnAppender::new(appender, true, true, outer_dl, c.repetition_level);
+	debug_assert_eq!(outer_dl + 2, inner.max_dl());
+	let unwrapped_appender = CowWrapperAppender { inner };
+	let array_appender = ArrayColumnAppender::new(unwrapped_appender, true, true, outer_dl, c.repetition_level);
 	callback.f::<Vec<Option<PgAny>>, _>(c, array_appender)
 }
+
+pub struct CowWrapperAppender<T> {
+	pub inner: DynRowCopier<T>
+}
+impl<T> ColumnAppenderBase for CowWrapperAppender<T> {
+	fn write_null(&mut self, repetition_index: &crate::level_index::LevelIndexList, level: i16) -> Result<usize, String> {
+		self.inner.write_null(repetition_index, level)
+	}
+
+	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn crate::column_pg_copier::DynamicSerializedWriter) -> Result<(), String> {
+		self.inner.write_columns(column_i, next_col)
+	}
+
+	fn max_dl(&self) -> i16 { self.inner.max_dl() }
+
+	fn max_rl(&self) -> i16 { self.inner.max_rl() }
+}
+impl<T> ColumnAppender<T> for CowWrapperAppender<T> {
+	fn copy_value(&mut self, repetition_index: &crate::level_index::LevelIndexList, value: T) -> Result<usize, String> {
+		let arc = Arc::new(value);
+		let cow = Cow::Owned(arc);
+		self.inner.copy_value(repetition_index, cow)
+	}
+}
+
 
 #[derive(Debug, Clone)]
 struct ColumnInfo {
@@ -537,12 +566,22 @@ trait AppenderCallback {
 struct CreateCopierCallback<TRow> { _dummy: PhantomData<TRow> }
 impl<TRow> CreateCopierCallback<TRow> { fn new() -> Self { CreateCopierCallback{_dummy: PhantomData} } }
 impl<TRow: PgAbstractRow> AppenderCallback for CreateCopierCallback<TRow> {
-	type TResult = DynCopier<TRow>;
-	fn f<TPg, TAppender>(&self, c: &ColumnInfo, appender: TAppender) -> DynCopier<TRow>
+	type TResult = DynRowCopier<TRow>;
+	fn f<TPg, TAppender>(&self, c: &ColumnInfo, appender: TAppender) -> DynRowCopier<TRow>
 		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + 'static {
-		Box::new(BasicPgColumnCopier::new(c.col_i, appender))
+		Box::new(BasicPgRowColumnAppender::new(c.col_i, appender))
 	}
 }
+
+// struct CreateSimpleCopierCallback<T> { _dummy: PhantomData<T> }
+// impl<TRow> CreateSimpleCopierCallback<TRow> { fn new() -> Self { CreateSimpleCopierCallback{_dummy: PhantomData} } }
+// impl<T: PgAbstractRow> AppenderCallback for CreateSimpleCopierCallback<T> {
+// 	type TResult = DynColumnAppender<T>;
+// 	fn f<TPg, TAppender>(&self, c: &ColumnInfo, appender: TAppender) -> DynColumnAppender<T>
+// 		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + 'static {
+// 		Box::new(BasicPgRowColumnAppender::new(c.col_i, appender))
+// 	}
+// }
 
 struct NopCallback { }
 impl AppenderCallback for NopCallback {

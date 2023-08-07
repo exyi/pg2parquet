@@ -329,3 +329,13 @@ impl<'b> PgAbstractRow for PgAnyRef<'b> {
 
 	fn ab_len(&self) -> usize { 1 }
 }
+
+impl<TRow: PgAbstractRow> PgAbstractRow for Arc<TRow> {
+    fn ab_get<'a, T: postgres::types::FromSql<'a>>(&'a self, index: usize) -> T {
+        self.as_ref().ab_get(index)
+    }
+
+    fn ab_len(&self) -> usize {
+        self.as_ref().ab_len()
+    }
+}

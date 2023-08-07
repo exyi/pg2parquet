@@ -1,7 +1,7 @@
 use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal};
 
-use crate::{column_appender::{ColumnAppender, GenericColumnAppender}, level_index::LevelIndexList, column_pg_copier::DynamicSerializedWriter, myfrom::MyFrom};
+use crate::{column_appender::{ColumnAppender, GenericColumnAppender, ColumnAppenderBase}, level_index::LevelIndexList, column_pg_copier::DynamicSerializedWriter, myfrom::MyFrom};
 
 
 fn convert_decimal_to_bytes(d: BigDecimal, scale: i32, precision: u32) -> Vec<u8> {
@@ -27,11 +27,7 @@ struct DecimalBytesAppender<TInner: ColumnAppender<Vec<u8>>> {
 	scale: i32,
 }
 
-impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppender<PgNumeric> for DecimalBytesAppender<TInner> {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: PgNumeric) -> Result<usize, String> {
-		let bytes = value.n.map(|n| convert_decimal_to_bytes(n, self.scale, self.precision));
-		self.inner.copy_value_opt(repetition_index, bytes)
-	}
+impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppenderBase for DecimalBytesAppender<TInner> {
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		self.inner.write_null(repetition_index, level)
 	}
@@ -40,4 +36,11 @@ impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppender<PgNumeric> for DecimalBytes
 	}
 	fn max_dl(&self) -> i16 { self.inner.max_dl() }
 	fn max_rl(&self) -> i16 { self.inner.max_rl() }
+}
+
+impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppender<PgNumeric> for DecimalBytesAppender<TInner> {
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: PgNumeric) -> Result<usize, String> {
+		let bytes = value.n.map(|n| convert_decimal_to_bytes(n, self.scale, self.precision));
+		self.inner.copy_value_opt(repetition_index, bytes)
+	}
 }

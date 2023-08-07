@@ -1,9 +1,9 @@
-use std::{marker::PhantomData, fs::File, io::Write, cell::RefCell, sync::Arc};
+use std::{marker::PhantomData, fs::File, io::Write, cell::RefCell, sync::Arc, borrow::Cow};
 
 use parquet::{file::writer::{SerializedColumnWriter, SerializedRowGroupWriter}, errors::ParquetError};
 use postgres::types::FromSql;
 
-use crate::{column_appender::*, level_index::*, pg_custom_types::PgAbstractRow};
+use crate::{column_appender::*, level_index::*, pg_custom_types::PgAbstractRow, postgres_cloner::DynRowCopier};
 
 pub type Arcell<T> = Arc<RefCell<T>>;
 
@@ -33,100 +33,74 @@ pub fn new_dynamic_serialized_writer<'a, W: Write>(hovno: Arcell<Option<Serializ
 	Box::new(DynamicSerializedWriterImpl::<'a, W> { writer: hovno })
 }
 
-
-pub trait ColumnCopier<TReader> {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: &TReader) -> Result<usize, String>;
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String>;
-
-	// fn write_columns<'b, W: Write>(&mut self, writer: &mut SerializedRowGroupWriter<'b, W>) -> Result<(), ParquetError> where Self: Sized;
-	fn write_columns<'b>(&mut self, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String>;
-	// fn write_columns_file<'b>(&mut self, writer: &mut SerializedRowGroupWriter<'b, File>) -> Result<(), ParquetError> where Self: Sized;
-}
-
-pub fn copier_write_columns<'a, 'b: 'a, W: Write, TReader, C: ColumnCopier<TReader>>(
-	s: &mut C, writer: Arcell<Option<SerializedRowGroupWriter<'a, W>>>
+pub fn copier_write_columns<'a, 'b: 'a, W: Write, TReader, C: ColumnAppender<TReader>>(
+	s: &mut C, column_i: usize, writer: Arcell<Option<SerializedRowGroupWriter<'a, W>>>
 ) -> Result<(), String> {
 	let mut dynamic_writer = new_dynamic_serialized_writer(writer);
-	s.write_columns(dynamic_writer.as_mut())
+	s.write_columns(column_i, dynamic_writer.as_mut())
 }
 
-impl<T> ColumnCopier<T> for Box<dyn ColumnCopier<T>> {
-    fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: &T) -> Result<usize, String> {
-        self.as_mut().copy_value(repetition_index, reader)
-    }
-
-    fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-        self.as_mut().write_null(repetition_index, level)
-    }
-
-    fn write_columns<'b>(&mut self, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-        self.as_mut().write_columns(next_col)
-    }
-}
-
-
-pub struct BasicPgColumnCopier<TPg, TAppender>
-	where TAppender: ColumnAppender<TPg> {
+pub struct BasicPgRowColumnAppender<TPg, TInner>
+	where TInner: ColumnAppender<TPg> {
 	column_i: usize,
-	column: TAppender,
+	appender: TInner,
 	_dummy: PhantomData<TPg>
 }
 
-impl<TPg, TAppender> BasicPgColumnCopier<TPg, TAppender>
-	where TAppender: ColumnAppender<TPg> {
-	pub fn new(column_i: usize, appender: TAppender) -> Self {
-		BasicPgColumnCopier {
+impl<TPg, TInner> BasicPgRowColumnAppender<TPg, TInner>
+	where TInner: ColumnAppender<TPg> {
+	pub fn new(column_i: usize, appender: TInner) -> Self {
+		BasicPgRowColumnAppender {
 			column_i,
-			column: appender,
+			appender,
 			_dummy: PhantomData
 		}
 	}
 }
 
-impl<TPg, TAppender, TRow: PgAbstractRow> ColumnCopier<TRow> for BasicPgColumnCopier<TPg, TAppender>
+impl<TPg, TInner> ColumnAppenderBase for BasicPgRowColumnAppender<TPg, TInner>
+	where TInner: ColumnAppender<TPg> {
+	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		// println!("write_null: level: {}, max_rl: {}", level, self.column.max_rl());
+		debug_assert_eq!(repetition_index.level, self.appender.max_rl());
+		self.appender.write_null(repetition_index, level)
+	}
+
+	fn write_columns(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
+		// debug_assert_eq!(column_i, self.column_i);
+		self.appender.write_columns(column_i, next_col)
+	}
+
+	fn max_dl(&self) -> i16 { self.appender.max_dl() }
+
+	fn max_rl(&self) -> i16 { self.appender.max_rl() }
+}
+
+impl<'b, TPg, TAppender, TRow: PgAbstractRow> ColumnAppender<Cow<'b, Arc<TRow>>> for BasicPgRowColumnAppender<TPg, TAppender>
 	where TPg: for<'a> FromSql<'a>, TAppender: ColumnAppender<TPg> {
 
-	fn copy_value<'a>(&mut self, repetition_index: &LevelIndexList, reader: &'a TRow) -> Result<usize, String> {
-		debug_assert_eq!(repetition_index.level, self.column.max_rl());
+	fn copy_value<'a>(&mut self, repetition_index: &LevelIndexList, reader: Cow<'a, Arc<TRow>>) -> Result<usize, String> {
+		debug_assert_eq!(repetition_index.level, self.appender.max_rl());
 
 		let v = reader.ab_get::<Option<TPg>>(self.column_i);
 
-		self.column.copy_value_opt(repetition_index, v)
-	}
-
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-		// println!("write_null: level: {}, max_rl: {}", level, self.column.max_rl());
-		debug_assert_eq!(repetition_index.level, self.column.max_rl());
-		self.column.write_null(repetition_index, level)
-	}
-
-	fn write_columns<'b>(&mut self, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		self.column.write_columns(self.column_i, next_col)
+		self.appender.copy_value_opt(repetition_index, v)
 	}
 }
 
-pub struct MergedColumnCopier<TReader> {
-	columns: Vec<Box<dyn ColumnCopier<TReader>>>,
+pub struct MergedColumnAppender<TReader> {
+	columns: Vec<DynRowCopier<TReader>>,
 	max_dl: i16,
 	max_rl: i16
 }
 
-impl<'a, TReader> MergedColumnCopier<TReader> {
-	pub fn new(columns: Vec<Box<dyn ColumnCopier<TReader>>>, max_dl: i16, max_rl: i16) -> Self {
-		MergedColumnCopier { columns, max_dl, max_rl }
+impl<TReader> MergedColumnAppender<TReader> {
+	pub fn new(columns: Vec<DynRowCopier<TReader>>, max_dl: i16, max_rl: i16) -> Self {
+		MergedColumnAppender { columns, max_dl, max_rl }
 	}
 }
 
-impl<'a, TReader> ColumnCopier<TReader> for MergedColumnCopier<TReader> {
-
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: &TReader) -> Result<usize, String> {
-		let mut total = 0;
-		for c in self.columns.iter_mut() {
-			total += c.copy_value(repetition_index, reader)?;
-		}
-		Ok(total)
-	}
-
+impl<TReader> ColumnAppenderBase for MergedColumnAppender<TReader> {
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		let mut total = 0;
 		for c in self.columns.iter_mut() {
@@ -135,37 +109,29 @@ impl<'a, TReader> ColumnCopier<TReader> for MergedColumnCopier<TReader> {
 		Ok(total)
 	}
 
-	fn write_columns<'b>(&mut self, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		for c in self.columns.iter_mut() {
-			c.write_columns(next_col)?;
+	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
+		for (i, c) in self.columns.iter_mut().enumerate() {
+			c.write_columns(i, next_col)?;
 		}
 		Ok(())
 	}
-}
 
-impl<TReader> Clone for MergedColumnCopier<TReader> {
-	fn clone(&self) -> Self {
-		todo!();
-		// MergedColumnCopier {
-		// 	columns: self.columns.iter().map(|c| c.clone()).collect()
-		// }
+	fn max_dl(&self) -> i16 {
+		self.max_dl
+	}
+
+	fn max_rl(&self) -> i16 {
+		self.max_rl
 	}
 }
 
-impl<TReader> ColumnAppender<TReader> for MergedColumnCopier<TReader> {
-	fn write_columns(&mut self, _column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		ColumnCopier::write_columns(self, next_col)
+impl<'a, TReader> ColumnAppender<Cow<'a, Arc<TReader>>> for MergedColumnAppender<TReader> {
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<'a, Arc<TReader>>) -> Result<usize, String> {
+		let mut total = 0;
+		let reader_r = reader.as_ref();
+		for c in self.columns.iter_mut() {
+			total += c.copy_value(repetition_index, Cow::Borrowed(reader_r))?;
+		}
+		Ok(total)
 	}
-
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: TReader) -> Result<usize, String> {
-		ColumnCopier::copy_value(self, repetition_index, &value)
-    }
-
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-		ColumnCopier::write_null(self, repetition_index, level)
-    }
-
-	fn max_dl(&self) -> i16 { self.max_dl }
-
-	fn max_rl(&self) -> i16 { self.max_rl }
 }
