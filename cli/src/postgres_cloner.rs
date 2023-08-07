@@ -253,7 +253,7 @@ fn map_schema_column<Callback: AppenderCallback>(
 
 			let schema = ParquetType::group_type_builder(c.col_name())
 				.with_logical_type(Some(LogicalType::List))
-				.with_repetition(c.pq_repetition())
+				.with_repetition(Repetition::OPTIONAL)
 				.with_fields(&mut vec![
 					Arc::new(list_schema)
 				])
@@ -281,7 +281,7 @@ fn map_schema_column<Callback: AppenderCallback>(
 					Arc::new(ParquetType::primitive_type_builder("upper_inclusive", basic::Type::BOOLEAN).build().unwrap()),
 					Arc::new(ParquetType::primitive_type_builder("is_empty", basic::Type::BOOLEAN).build().unwrap()),
 				])
-				.with_repetition(c.pq_repetition())
+				.with_repetition(Repetition::OPTIONAL)
 				.build()
 				.unwrap();
 
@@ -305,7 +305,7 @@ fn map_schema_column<Callback: AppenderCallback>(
 
 			let schema = ParquetType::group_type_builder(c.col_name())
 				.with_fields(&mut parquet_types.into_iter().map(Arc::new).collect())
-				.with_repetition(c.pq_repetition())
+				.with_repetition(Repetition::OPTIONAL)
 				.build()
 				.unwrap();
 
@@ -338,12 +338,14 @@ fn map_simple_type<Callback: AppenderCallback>(
 			let scale = s.decimal_scale;
 			let precision = s.decimal_precision;
 			let schema = ParquetType::primitive_type_builder(name, basic::Type::BYTE_ARRAY)
-				.with_repetition(c.pq_repetition())
 				.with_logical_type(Some(LogicalType::Decimal { scale, precision: precision as i32 }))
 				.with_precision(precision as i32)
 				.with_scale(scale)
 				.build().unwrap();
-			let cp = wrap_appender(c, callback, new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale));
+			let cp = {
+    let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
+	callback.f(c, appender)
+};
 			(cp, schema)
 		},
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, callback, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
@@ -418,7 +420,6 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + 'static, TDataType, FConversi
 	c.definition_level += 1; // TODO: can we support NOT NULL fields?
 	let mut t =
 		ParquetType::primitive_type_builder(name, TDataType::get_physical_type())
-		.with_repetition(c.pq_repetition())
 		.with_converted_type(conv_type.unwrap_or(ConvertedType::NONE));
 
 	match length {
@@ -458,28 +459,18 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType, FConv
 ) -> Callback::TResult
 	where TDataType: DataType, TDataType::T: RealMemorySize {
 	let basic_appender: GenericColumnAppender<T, TDataType, _> = GenericColumnAppender::new(c.definition_level, c.repetition_level, convert);
-	wrap_appender(c, callback, basic_appender)
+	callback.f(c, basic_appender)
 }
 
 fn create_complex_appender<T: for <'a> FromSql<'a> + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, copiers: Vec<DynCopier<T>>) -> Callback::TResult {
 	let main_cp = MergedColumnCopier::new(copiers, c.definition_level + 1, c.repetition_level);
-	wrap_appender(c, callback, main_cp)
-}
-
-fn wrap_appender<T: for <'a> FromSql<'a> + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, appender: impl ColumnAppender<T> + 'static) -> Callback::TResult {
-	if c.is_array {
-		let dl = appender.max_dl() - 1;
-		let rl = appender.max_rl() - 1;
-		callback.f::<Vec<Option<T>>, _>(c, ArrayColumnAppender::new(appender, false, false, dl, rl))
-	} else {
-		callback.f(c, appender)
-	}
+	callback.f(c, main_cp)
 }
 
 fn create_array_copier<Callback: AppenderCallback>(inner: DynCopier<PgAny>, c: &ColumnInfo, inner_max_dl: i16, inner_max_rl: i16, callback: Callback) -> Callback::TResult {
 	let appender = WrapperColumnAppender::<PgAny, DynCopier<PgAny>>::new(inner, inner_max_dl, inner_max_rl);
 	let outer_dl = c.definition_level + 1;
-	debug_assert_eq!(outer_dl, inner_max_dl);
+	debug_assert_eq!(outer_dl + 2, inner_max_dl);
 	let array_appender = ArrayColumnAppender::new(appender, true, true, outer_dl, c.repetition_level);
 	callback.f::<Vec<Option<PgAny>>, _>(c, array_appender)
 }
@@ -500,13 +491,6 @@ impl ColumnInfo {
 			is_array: false,
 			definition_level: 0,
 			repetition_level: 0,
-		}
-	}
-	fn pq_repetition(&self) -> Repetition {
-		if self.is_array {
-			Repetition::REPEATED
-		} else {
-			Repetition::OPTIONAL
 		}
 	}
 
