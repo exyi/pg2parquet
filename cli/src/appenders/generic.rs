@@ -20,6 +20,13 @@ pub struct GenericColumnAppender<TPg, TPq, FConversion>
 	conversion: Arc<FConversion>,
 }
 
+pub fn new_autoconv_generic_appender<TPg, TPq: DataType>(
+	max_dl: i16, max_rl: i16,
+) -> GenericColumnAppender<TPg, TPq, impl Fn(TPg) -> TPq::T>
+	where TPq::T: Clone + RealMemorySize, TPq::T: MyFrom<TPg> {
+	GenericColumnAppender::new(max_dl, max_rl, |value: TPg| MyFrom::my_from(value))
+}
+
 impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
 
@@ -77,14 +84,6 @@ impl<TPg, TPq, FConversion> Clone for GenericColumnAppender<TPg, TPq, FConversio
 			repetition_index: self.repetition_index.clone(),
 			conversion: self.conversion.clone(),
 		}
-	}
-}
-
-impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize + MyFrom<TPg>, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
-
-	pub fn new_mfrom(max_dl: i16, max_rl: i16) -> GenericColumnAppender<TPg, TPq, impl Fn(TPg) -> TPq::T> {
-		GenericColumnAppender::new(max_dl, max_rl, |x| TPq::T::my_from(x))
 	}
 }
 

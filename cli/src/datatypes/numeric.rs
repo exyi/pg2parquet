@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal};
 
-use crate::appenders::{GenericColumnAppender, ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter};
+use crate::appenders::{GenericColumnAppender, ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter, new_autoconv_generic_appender};
 use crate::level_index::LevelIndexList;
 use crate::myfrom::MyFrom;
 
@@ -16,7 +16,7 @@ fn convert_decimal_to_bytes(d: &BigDecimal, scale: i32, precision: u32) -> Vec<u
 }
 
 pub fn new_decimal_bytes_appender(max_dl: i16, max_rl: i16, precision: u32, scale: i32) -> impl ColumnAppender<PgNumeric> {
-	let inner: GenericColumnAppender<Vec<u8>, ByteArrayType, _> = GenericColumnAppender::new(max_dl, max_rl, |v| MyFrom::my_from(v));
+	let inner: GenericColumnAppender<Vec<u8>, ByteArrayType, _> = new_autoconv_generic_appender(max_dl, max_rl);
 	DecimalBytesAppender {
 		inner,
 		precision,

@@ -74,3 +74,13 @@ impl<T: Clone, TInner: ColumnAppender<Arc<T>>> ColumnAppender<T> for RcWrapperAp
 		self.inner.copy_value(repetition_index, cow)
 	}
 }
+
+
+pub trait RcWrapperExt<TInner: ColumnAppender<Arc<T>>, T> {
+    fn rc_wrapper(self) -> RcWrapperAppender<T, TInner>;
+}
+impl<TInner: ColumnAppender<Arc<T>>, T> RcWrapperExt<TInner, T> for TInner {
+    fn rc_wrapper(self) -> RcWrapperAppender<T, TInner> {
+        RcWrapperAppender::new(self)
+    }
+}

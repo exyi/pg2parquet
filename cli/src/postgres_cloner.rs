@@ -20,7 +20,7 @@ use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr};
 
 use crate::PostgresConnArgs;
-use crate::appenders::{ColumnAppender, DynamicMergedAppender, RealMemorySize, ArrayColumnAppender, ColumnAppenderBase, GenericColumnAppender, BasicPgRowColumnAppender, RcWrapperAppender};
+use crate::appenders::{ColumnAppender, DynamicMergedAppender, RealMemorySize, ArrayColumnAppender, ColumnAppenderBase, GenericColumnAppender, BasicPgRowColumnAppender, RcWrapperAppender, StaticMergedAppender, new_autoconv_generic_appender, PreprocessExt, new_static_merged_appender};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
@@ -272,9 +272,6 @@ fn map_schema_column<Callback: AppenderCallback>(
 			// cc.repetition_level += c.is_array as i16;
 			let col_lower = map_schema_column(element_type, &c.nest("lower", 0), settings, ReadPgColumnCallback::<PgRawRange>::new())?;
 			let col_upper = map_schema_column(element_type, &c.nest("upper", 1), settings, ReadPgColumnCallback::<PgRawRange>::new())?;
-			let col_lower_incl = create_primitive_appender_simple::<bool, BoolType, _>(&c.nest("lower_inclusive", 2));
-			let col_upper_incl = create_primitive_appender_simple::<bool, BoolType, _>(&c.nest("upper_inclusive", 3));
-			let col_is_empty = create_primitive_appender_simple::<bool, BoolType, _>(&c.nest("is_empty", 4));
 
 			let schema = ParquetType::group_type_builder(c.col_name())
 				.with_fields(&mut vec![
@@ -288,15 +285,32 @@ fn map_schema_column<Callback: AppenderCallback>(
 				.build()
 				.unwrap();
 
-			let appender = create_complex_appender::<PgRawRange, _>(c, callback, vec![
-				col_lower.0,
-				col_upper.0,
-				col_lower_incl,
-				col_upper_incl,
-				col_is_empty,
-			]);
+			// let appender = create_complex_appender::<PgRawRange, _>(c, callback, vec![
+			// 	col_lower.0,
+			// 	col_upper.0,
+			// 	col_lower_incl,
+			// 	col_upper_incl,
+			// 	col_is_empty,
+			// ]);
+			let appender = new_static_merged_appender::<Arc<PgRawRange>>(c.definition_level + 1, c.repetition_level)
+				.add_appender(col_lower.0)
+				.add_appender(col_upper.0)
+				.add_appender_map(
+					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
+					|r| Cow::Owned(r.as_ref().lower_inclusive)
+				)
+				.add_appender_map(
+					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
+					|r| Cow::Owned(r.as_ref().upper_inclusive)
+				)
+				.add_appender_map(
+					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
+					|r| Cow::Owned(r.as_ref().is_empty)
+				);
 
-			Ok((appender, schema))
+			let appender_dyn = callback.f(c, RcWrapperAppender::new(appender));
+
+			Ok((appender_dyn, schema))
 		},
 		&Kind::Composite(ref fields) => {
 			let (mut column_appenders, mut parquet_types) = (vec![], vec![]);
@@ -557,6 +571,15 @@ impl<TRow: PgAbstractRow> AppenderCallback for ReadPgColumnCallback<TRow> {
 // 	fn f<TPg, TAppender>(&self, c: &ColumnInfo, appender: TAppender) -> DynColumnAppender<T>
 // 		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + 'static {
 // 		Box::new(BasicPgRowColumnAppender::new(c.col_i, appender))
+// 	}
+// }
+
+// struct ReturnCallback { }
+// impl AppenderCallback for ReturnCallback {
+// 	type TResult = TAppender;
+// 	fn f<TPg, TAppender>(&self, _: &ColumnInfo, _: TAppender) -> ()
+// 		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + Clone + 'static {
+// 		()
 // 	}
 // }
 

@@ -1,5 +1,6 @@
-use std::{sync::Arc, any::TypeId};
+use std::{sync::Arc, any::TypeId, io::Read};
 
+use byteorder::{ReadBytesExt, BigEndian};
 use postgres::types::{FromSql, Kind, WrongType, Field};
 use postgres_protocol::types as pgtypes;
 
@@ -85,10 +86,16 @@ pub struct PgRawRange {
 	pub is_empty: bool
 }
 
+fn read_byte_vec(raw: &mut &[u8], len: usize) -> Result<Vec<u8>, Box<dyn std::error::Error + Sync + Send>> {
+	let mut buf = vec![0u8; len];
+	raw.read_exact(&mut buf)?;
+	Ok(buf)
+}
+
 impl<'a> FromSql<'a> for PgRawRange {
-	fn from_sql(ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-		let inner_t = match ty.kind() {
-			Kind::Range(inner_t) => inner_t,
+	fn from_sql(ty: &postgres::types::Type, mut raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+		let element_type = match ty.kind() {
+			Kind::Range(inner_t) => inner_t.clone(),
 			_ => panic!("Not a range type")
 		};
 		// /* A range's flags byte contains these bits: */
@@ -102,7 +109,7 @@ impl<'a> FromSql<'a> for PgRawRange {
 		// #define RANGE_CONTAIN_EMPTY 0x80/* marks a GiST internal-page entry whose
 		// 								 * subtree contains some empty ranges */
 		// A range has no lower bound if any of RANGE_EMPTY, RANGE_LB_INF (or RANGE_LB_NULL, not used anymore) is set. The same applies for upper bounds.
-		let flags = raw[0];
+		let flags = raw.read_u8()?;
 		let is_empty = flags & 0x01 != 0;
 		let lower_inclusive = flags & 0x02 != 0;
 		let upper_inclusive = flags & 0x04 != 0;
@@ -111,55 +118,32 @@ impl<'a> FromSql<'a> for PgRawRange {
 		let lower_null = flags & 0x20 != 0;
 		let upper_null = flags & 0x40 != 0;
 
-
-		let mut index = 1;
-
 		let lower = if is_empty || lower_inf || lower_null {
 			None
 		} else {
-			let len = read_pg_len(&raw[index..]);
-			index += 4;
+			let len = raw.read_i32::<BigEndian>()?;
 			if len < 0 {
 				None
 			} else {
-				let inner_buf = &raw[index..index + len as usize];
-				index += len as usize;
-				Some(inner_buf)
+				Some(read_byte_vec(&mut raw, len as usize)?)
 			}
 		};
 		let upper = if is_empty || upper_inf || upper_null {
 			None
 		} else {
-			let len = read_pg_len(&raw[index..]);
-			index += 4;
+			let len = raw.read_i32::<BigEndian>()?;
 			if len < 0 {
 				None
 			} else {
-				let inner_buf = &raw[index..index + len as usize];
-				index += len as usize;
-				Some(inner_buf)
+				Some(read_byte_vec(&mut raw, len as usize)?)
 			}
 		};
-		assert_eq!(index, raw.len());
+		assert_eq!(0, raw.len()); // Nothing should be remaining in the buffer
 
 		if is_empty {
-			Ok(PgRawRange {
-				element_type: inner_t.clone(),
-				lower: None,
-				upper: None,
-				lower_inclusive: false,
-				upper_inclusive: false,
-				is_empty: true
-			})
+			Ok(PgRawRange { element_type, lower: None, upper: None, lower_inclusive: false, upper_inclusive: false, is_empty: true })
 		} else {
-			Ok(PgRawRange {
-				element_type: inner_t.clone(),
-				lower: lower.map(|x| x.to_vec()),
-				upper: upper.map(|x| x.to_vec()),
-				lower_inclusive,
-				upper_inclusive,
-				is_empty: false
-			})
+			Ok(PgRawRange { element_type, lower, upper, lower_inclusive, upper_inclusive, is_empty: false })
 		}
 	}
 
@@ -255,34 +239,18 @@ impl PgAbstractRow for postgres::Row {
 impl<'b> PgAbstractRow for PgRawRange {
     fn ab_get<'a, T: FromSql<'a>>(&'a self, index: usize) -> T {
 		// println!("ab_get: {:?} {:?}", index, &self);
-		match index {
-			0 => {
-				assert!(T::accepts(&self.element_type));
-				T::from_sql_nullable(&self.element_type, self.lower.as_ref().map(|x| &x[..])).unwrap()
-			},
-			1 => {
-				assert!(T::accepts(&self.element_type));
-				T::from_sql_nullable(&self.element_type, self.upper.as_ref().map(|x| &x[..])).unwrap()
-			},
-			2 => hack_from_bool(self.lower_inclusive),
-			3 => hack_from_bool(self.upper_inclusive),
-			4 => hack_from_bool(self.is_empty),
+		let r = match index {
+			0 => self.lower.as_ref(),
+			1 => self.upper.as_ref(),
 			_ => panic!("Invalid index")
-		}
-    }
+		};
+		assert!(T::accepts(&self.element_type));
+		T::from_sql_nullable(&self.element_type, r.map(|x| &x[..])).unwrap()
+	}
 
     fn ab_len(&self) -> usize {
 		5
     }
-}
-
-fn hack_from_bool<'a, T: FromSql<'a>>(b: bool) -> T {
-	// println!("{}", WrongType::new::<T>(postgres::types::Type::BOOL.clone()));
-	if b {
-		T::from_sql_nullable(&postgres::types::Type::BOOL, Some(&[1])).unwrap()
-	} else {
-		T::from_sql_nullable(&postgres::types::Type::BOOL, Some(&[0])).unwrap()
-	}
 }
 
 impl PgAbstractRow for PgRawRecord {

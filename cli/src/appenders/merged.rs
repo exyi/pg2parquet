@@ -1,8 +1,8 @@
 use std::{sync::Arc, borrow::Cow, marker::PhantomData};
 
-use crate::{postgres_cloner::DynRowAppender, level_index::LevelIndexList};
+use crate::{postgres_cloner::DynRowAppender, level_index::LevelIndexList, myfrom::MyFrom};
 
-use super::{ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter};
+use super::{ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, GenericColumnAppender};
 
 pub struct DynamicMergedAppender<T> {
 	columns: Vec<DynRowAppender<T>>,
@@ -52,20 +52,29 @@ impl<T> ColumnAppender<Arc<T>> for DynamicMergedAppender<T> {
 	}
 }
 
-#[allow(private_in_public)]
-pub trait StaticMergedAppender<T: Clone>: ColumnAppender<T> {
-    // Warnings..., hopefully they stabilize return_position_impl_trait_in_trait before phasing this out
-    fn new(max_dl: i16, max_rl: i16) -> StaticMergedAppenderNil {
-        StaticMergedAppenderNil { max_dl, max_rl }
-    }
-
-    fn add_appender<A: ColumnAppender<T>>(self, appender: A) -> StaticMergedAppenderImpl<T, Self, A>
-        where Self: Sized {
-        StaticMergedAppenderImpl { appender: self, next: appender, _dummy: PhantomData }
-    }
+pub fn new_static_merged_appender<T: Clone>(max_dl: i16, max_rl: i16) -> impl StaticMergedAppender<T> {
+    StaticMergedAppenderNil { max_dl, max_rl }
 }
 
-struct StaticMergedAppenderImpl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> {
+pub trait StaticMergedAppender<T: Clone>: ColumnAppender<T> {
+    fn add_appender<A: ColumnAppender<T>>(self, appender: A) -> StaticMergedAppenderImpl<T, A, Self>
+        where Self: Sized {
+        StaticMergedAppenderImpl { appender, next: self, _dummy: PhantomData }
+    }
+    fn add_appender_map<A: ColumnAppender<T2>, T2: Clone, F: Fn(Cow<T>) -> Cow<T2>>(self, appender: A, f: F) -> StaticMergedAppenderImpl<T, PreprocessAppender<T, T2, A, F>, Self>
+        where Self: Sized {
+        StaticMergedAppender::add_appender(self, appender.preprocess(f))
+    }
+
+    // fn add_primitive_column<TPq: parquet::data_type::DataType, T2: Clone, F: Fn(Cow<T>) -> Cow<T2>>(self, max_dl: i16, max_rl: i16, f: F) -> StaticMergedAppenderImpl<T, PreprocessAppender<T, T2, GenericColumnAppender<T2, TPq, impl Fn(TPg) -> TPq::T>, F>, Self>
+    //     where Self: Sized,
+    //           TPq::T : MyFrom<T2> + RealMemorySize {
+    //     let appender = new_autoconv_generic_appender::<T2, TPq>(max_dl, max_rl);
+    //     StaticMergedAppender::add_appender_map(self, appender, f)
+    // }
+}
+
+pub struct StaticMergedAppenderImpl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> {
     pub appender: TAppender,
     pub next: Next,
     pub _dummy: PhantomData<T>
@@ -103,7 +112,7 @@ impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> ColumnAppe
 
 impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> StaticMergedAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {}
 
-struct StaticMergedAppenderNil {
+pub struct StaticMergedAppenderNil {
     pub max_dl: i16,
     pub max_rl: i16
 }
@@ -122,13 +131,13 @@ impl ColumnAppenderBase for StaticMergedAppenderNil {
     fn max_rl(&self) -> i16 { self.max_rl }
 }
 
-impl<T: Copy> ColumnAppender<T> for StaticMergedAppenderNil {
+impl<T: Clone> ColumnAppender<T> for StaticMergedAppenderNil {
     fn copy_value(&mut self, _repetition_index: &LevelIndexList, _reader: Cow<T>) -> Result<usize, String> {
         Ok(0)
     }
 }
 
-impl<T: Copy> StaticMergedAppender<T> for StaticMergedAppenderNil {}
+impl<T: Clone> StaticMergedAppender<T> for StaticMergedAppenderNil {}
 
 
 // trait StaticMergedAppenderCore<T> {

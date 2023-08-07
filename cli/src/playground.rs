@@ -1,6 +1,6 @@
 use parquet::data_type::{Int32Type, Int64Type, ByteArrayType};
 use parquet::file::{writer::SerializedFileWriter, properties::WriterProperties};
-use parquet::{schema::types::Type};
+use parquet::schema::types::Type;
 use parquet::basic::{Encoding, Compression, self, Repetition, ConvertedType};
 use parquet::format::{self, StringType};
 use std::mem;
