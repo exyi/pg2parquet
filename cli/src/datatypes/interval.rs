@@ -1,9 +1,8 @@
+use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt, LittleEndian};
 use parquet::data_type::FixedLenByteArray;
 use postgres::types::FromSql;
 
 use crate::myfrom::MyFrom;
-
-use super::utils;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PgInterval {
@@ -13,10 +12,10 @@ pub struct PgInterval {
 }
 
 impl<'a> FromSql<'a> for PgInterval {
-	fn from_sql(_ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-		let time = utils::read_i64(&raw[0..8]);
-		let day = utils::read_i32(&raw[8..12]);
-		let month = utils::read_i32(&raw[12..16]);
+	fn from_sql(_ty: &postgres::types::Type, mut raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+		let time = raw.read_i64::<BigEndian>()?;
+		let day = raw.read_i32::<BigEndian>()?;
+		let month = raw.read_i32::<BigEndian>()?;
 		Ok(PgInterval { microseconds: time, day, month })
 	}
 
@@ -36,10 +35,10 @@ impl MyFrom<PgInterval> for FixedLenByteArray {
 		let millis_total = t.microseconds / 1000;
 		let days = millis_total / ms_per_day;
 		let millis = millis_total % ms_per_day;
-		let mut b = [0u8; 12];
+		let mut b = vec! [0u8; 12];
 		b[0..4].copy_from_slice(&i32::to_le_bytes(t.month));
 		b[4..8].copy_from_slice(&i32::to_le_bytes(t.day + days as i32));
 		b[8..12].copy_from_slice(&i32::to_le_bytes(millis as i32));
-		FixedLenByteArray::from(b.to_vec())
+		FixedLenByteArray::from(b)
 	}
 }

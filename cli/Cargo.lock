@@ -88,6 +88,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 
 [[package]]
+name = "base64"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "604178f6c5c21f02dc555784810edfb88d34ac2c73b2eae109655649ee73ce3d"
+
+[[package]]
 name = "bigdecimal"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -878,7 +884,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74fd590f0672998df84503d1bcbebc69732583d03cc3495c7dd8d3e5a1d8437f"
 dependencies = [
  "ahash",
- "base64",
+ "base64 0.13.0",
  "brotli",
  "bytes",
  "chrono",
@@ -905,6 +911,7 @@ name = "pg2parquet"
 version = "0.1.0-beta.4"
 dependencies = [
  "bit-vec",
+ "byteorder",
  "bytes",
  "chrono",
  "clap",
@@ -915,6 +922,7 @@ dependencies = [
  "pg_bigdecimal",
  "postgres",
  "postgres-native-tls",
+ "postgres-protocol",
  "uuid",
 ]
 
@@ -996,11 +1004,11 @@ dependencies = [
 
 [[package]]
 name = "postgres-protocol"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "878c6cbf956e03af9aa8204b407b9cbf47c072164800aa918c516cd4b056c50c"
+checksum = "78b7fa9f396f51dffd61546fd8573ee20592287996568e6175ceb0f8699ad75d"
 dependencies = [
- "base64",
+ "base64 0.21.2",
  "byteorder",
  "bytes",
  "fallible-iterator",
