@@ -126,6 +126,8 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 	} else {
 		pg_config.password(&read_password(pg_config.get_user().unwrap())?.trim());
 	}
+
+	#[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64"))))]
 	match args.sslmode {
 		None => {},
 		Some(crate::SslMode::Disable) => {
