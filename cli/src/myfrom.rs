@@ -90,12 +90,6 @@ impl MyFrom<uuid::Uuid> for FixedLenByteArray {
 	}
 }
 
-impl<'a> MyFrom<PgEnum> for i32 {
-	fn my_from(t: PgEnum) -> Self {
-		t.case as i32
-	}
-}
-
 impl<'a> MyFrom<PgEnum> for ByteArray {
 	fn my_from(t: PgEnum) -> Self {
 		ByteArray::from(t.name.into_bytes())

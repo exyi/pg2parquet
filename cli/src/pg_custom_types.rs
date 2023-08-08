@@ -12,26 +12,14 @@ fn read_pg_len(bytes: &[u8]) -> i32 {
 
 #[derive(Debug, Clone)]
 pub struct PgEnum {
-	pub name: String,
-	pub case: i64
+	pub name: String
 }
 
 impl<'a> FromSql<'a> for PgEnum {
 	fn from_sql(ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+		debug_assert!(match ty.kind() { Kind::Enum(_) => true, _ => false });
 		let s = String::from_utf8(raw.to_vec())?;
-		let case =
-			match ty.kind() {
-				Kind::Enum(cases) =>
-					cases.iter()
-						.position(|c| c == &s)
-						.map(|x| x as i64)
-						.unwrap_or(-1), 
-				_ => -1
-			};
-		Ok(PgEnum {
-			name: s,
-			case
-		})
+		Ok(PgEnum { name: s })
 	}
 
 	fn accepts(ty: &postgres::types::Type) -> bool {

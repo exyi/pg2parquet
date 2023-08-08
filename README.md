@@ -163,7 +163,7 @@ Options:
           - plain-text:
             Enum is stored as the postgres enum name, Parquet LogicalType is set to String
           - int:
-            Enum is stored as an 32-bit integer (zero-based index of the value in the enum definition)
+            Enum is stored as an 32-bit integer (one-based index of the value in the enum definition)
 
       --interval-handling <INTERVAL_HANDLING>
           How to handle `interval` columns

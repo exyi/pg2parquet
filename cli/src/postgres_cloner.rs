@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::io::{self, Write};
 use std::marker::PhantomData;
@@ -65,7 +66,7 @@ pub enum SchemaSettingsEnumHandling {
 	Text,
 	/// Enum is stored as the postgres enum name, Parquet LogicalType is set to String
 	PlainText,
-	/// Enum is stored as an 32-bit integer (zero-based index of the value in the enum definition)
+	/// Enum is stored as an 32-bit integer (one-based index of the value in the enum definition)
 	Int
 }
 
@@ -261,8 +262,15 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 			map_simple_type(t, c, settings),
 		Kind::Enum(ref _enum_data) =>
 			match settings.enum_handling {
-				SchemaSettingsEnumHandling::Int =>
-					Ok(resolve_primitive::<PgEnum, Int32Type, _>(c.col_name(), c, None, None)),
+				SchemaSettingsEnumHandling::Int => {
+					let mut mapping = HashMap::new();
+					for (i, v) in _enum_data.iter().enumerate() {
+						mapping.insert(v.to_string(), i as i32 + 1);
+					}
+					Ok(resolve_primitive_conv::<PgEnum, Int32Type, _, _>(c.col_name(), c, None, None, None, move |e|
+						*mapping.get(&e.name).unwrap_or_else(|| panic!("Could not map enum value {}. Was new enum case added while pg2parquet is running?", &e.name))
+					))
+				},
 				SchemaSettingsEnumHandling::Text | SchemaSettingsEnumHandling::PlainText => {
 					let logical_type = if settings.enum_handling == SchemaSettingsEnumHandling::Text {
 						LogicalType::Enum
