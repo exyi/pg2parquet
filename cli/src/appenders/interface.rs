@@ -59,10 +59,10 @@ pub type Arcell<T> = Arc<RefCell<T>>;
 pub trait DynamicSerializedWriter {
 	fn next_column(&mut self, callback: &mut dyn FnMut(SerializedColumnWriter<'_>) -> ()) -> parquet::errors::Result<bool>;
 }
-struct DynamicSerializedWriterImpl<'a, W: Write> {
+struct DynamicSerializedWriterImpl<'a, W: Write + Send> {
 	writer: Arcell<Option<SerializedRowGroupWriter<'a, W>>>
 }
-impl<'a, 'b, W: Write> DynamicSerializedWriter for DynamicSerializedWriterImpl<'a, W> {
+impl<'a, 'b, W: Write + Send> DynamicSerializedWriter for DynamicSerializedWriterImpl<'a, W> {
 	fn next_column(&mut self, callback: &mut dyn FnMut(SerializedColumnWriter<'_>) -> ()) -> parquet::errors::Result<bool> {
 		let mut writer = self.writer.borrow_mut();
 		let writer2 = writer.as_mut().unwrap();
@@ -77,6 +77,6 @@ impl<'a, 'b, W: Write> DynamicSerializedWriter for DynamicSerializedWriterImpl<'
 	}
 }
 
-pub fn new_dynamic_serialized_writer<'a, W: Write>(writer: Arcell<Option<SerializedRowGroupWriter<'a, W>>>) -> Box<dyn DynamicSerializedWriter + 'a> {
+pub fn new_dynamic_serialized_writer<'a, W: Write + Send>(writer: Arcell<Option<SerializedRowGroupWriter<'a, W>>>) -> Box<dyn DynamicSerializedWriter + 'a> {
 	Box::new(DynamicSerializedWriterImpl::<'a, W> { writer })
 }

@@ -73,14 +73,14 @@ impl MyFrom<chrono::NaiveDateTime> for i64 {
 impl MyFrom<chrono::NaiveDate> for i32 {
 	fn my_from(t: chrono::NaiveDate) -> Self {
 		// number of days since 1970-01-01
-		t.sub(chrono::NaiveDate::from_ymd(1970, 1, 1)).num_days() as i32
+		t.sub(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32
 	}
 }
 
 impl MyFrom<chrono::NaiveTime> for i64 {
 	fn my_from(t: chrono::NaiveTime) -> Self {
 		// number of seconds since 00:00:00
-		t.signed_duration_since(chrono::NaiveTime::from_hms(0, 0, 0)).num_microseconds().unwrap()
+		t.signed_duration_since(chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_microseconds().unwrap()
 	}
 }
 

@@ -12,10 +12,10 @@ fn print_col_info<T: DataType<T = T2>, T2: Default + Clone + ParquetTypeFormat>(
 	let mut data: Vec<T2> = vec![<T as DataType>::T::default(); batch_size];
 	let mut dls = vec![0; batch_size];
 	let mut rls = vec![0; batch_size];
-	let (valuecount, totalcount) = reader.read_batch(batch_size, Some(&mut dls), Some(&mut rls), &mut data).unwrap();
+	let (record_count, valuecount, totalcount) = reader.read_records(batch_size, Some(&mut dls), Some(&mut rls), &mut data).unwrap();
 
 	let data_display = DisplayDataRow { vec: data[0..valuecount].to_vec(), lt: col.logical_type(), ct: col.converted_type() };
-	println!("{}: {:?} {}", col_name, (valuecount, totalcount), data_display);
+	println!("{}: {:?} {}", col_name, (record_count, valuecount, totalcount), data_display);
 
 	if dls.iter().any(|x| *x != 0) {
 		println!("dls: {:?}", dls[0..totalcount].to_vec());

@@ -17,7 +17,7 @@ pub struct GenericColumnAppender<TPg, TPq, FConversion>
 	dummy: PhantomData<TPg>,
 	dummy2: PhantomData<TPq>,
 	repetition_index: LevelIndexState,
-	conversion: Arc<FConversion>,
+	conversion: FConversion,
 }
 
 pub fn new_autoconv_generic_appender<TPg, TPq: DataType>(
@@ -42,7 +42,7 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 			dls: Vec::new(),
 			rls: Vec::new(),
 			repetition_index: LevelIndexState::new(max_rl),
-			conversion: Arc::new(conversion),
+			conversion,
 		}
 	}
 
@@ -70,23 +70,6 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 	}
 }
 
-impl<TPg, TPq, FConversion> Clone for GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
-	fn clone(&self) -> Self {
-		GenericColumnAppender {
-			max_dl: self.max_dl,
-			max_rl: self.max_rl,
-			column: self.column.clone(),
-			dummy: PhantomData,
-			dummy2: PhantomData,
-			dls: self.dls.clone(),
-			rls: self.rls.clone(),
-			repetition_index: self.repetition_index.clone(),
-			conversion: self.conversion.clone(),
-		}
-	}
-}
-
 impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TPq, FConversion>
 	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
 
@@ -94,10 +77,10 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TP
 		let mut error = None;
 		let c = next_col.next_column(&mut |mut column| {
 			let result = self.write_column(&mut column);
-			error = result.err();
+			let error1 = result.err();
 			let result2 = column.close();
 
-			error = error.clone().or(result2.err());
+			error = error1.or(result2.err());
 			
 		}).map_err(|e| format!("Could not create column[{}]: {}", column_i, e))?;
 

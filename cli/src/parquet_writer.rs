@@ -18,7 +18,7 @@ pub struct WriterSettings {
 	pub row_group_row_limit: usize
 }
 
-pub struct ParquetRowWriter<W: Write> {
+pub struct ParquetRowWriter<W: Write + Send> {
 	writer: SerializedFileWriter<W>,
 	schema: parquet::schema::types::TypePtr,
 	// row_group_writer: SerializedRowGroupWriter<'a, W>,
@@ -29,7 +29,7 @@ pub struct ParquetRowWriter<W: Write> {
 	current_group_rows: usize
 }
 
-impl <W: Write> ParquetRowWriter<W> {
+impl <W: Write + Send> ParquetRowWriter<W> {
 	pub fn new(
 		writer: SerializedFileWriter<W>,
 		schema: parquet::schema::types::TypePtr,

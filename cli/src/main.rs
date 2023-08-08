@@ -3,6 +3,7 @@
 use std::{sync::Arc, path::PathBuf, process};
 
 use clap::{Parser, ValueEnum, Command};
+use parquet::basic::{ZstdLevel, BrotliLevel, GzipLevel};
 use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling, SchemaSettingsEnumHandling, SchemaSettingsIntervalHandling};
 
 mod postgresutils;
@@ -54,6 +55,9 @@ struct ExportArgs {
     /// Compression applied on the output file. Default: zstd, change to Snappy or None if it's too slow
     #[arg(long, hide_short_help = true)]
     compression: Option<ParquetCompression>,
+    /// Compression level of the output file compressor. Only relevant for zstd, brotli and gzip. Default: 3
+    #[arg(long, hide_short_help = true)]
+    compression_level: Option<i32>,
     #[command(flatten)]
     postgres: PostgresConnArgs,
     #[command(flatten)]
@@ -152,6 +156,30 @@ fn handle_result<T, TErr: ToString>(r: Result<T, TErr>) -> T {
     }
 }
 
+fn get_compression(args: &ExportArgs) -> Result<parquet::basic::Compression, parquet::errors::ParquetError> {
+    let lvl = args.compression_level;
+    let level_not_supported =
+        if lvl.is_some() {
+            Err(parquet::errors::ParquetError::General(format!(
+                "Compression algorithm {:?} does not allow setting --compression-level option",
+                args.compression.as_ref().unwrap()
+            )))
+        } else {
+            Ok(())
+        };
+    let compression = match args.compression {
+        None => parquet::basic::Compression::ZSTD(ZstdLevel::try_new(lvl.unwrap_or(3))?),
+        Some(ParquetCompression::Brotli) => parquet::basic::Compression::BROTLI(BrotliLevel::try_new(lvl.unwrap_or(3) as u32)?),
+        Some(ParquetCompression::Gzip) => parquet::basic::Compression::GZIP(GzipLevel::try_new(lvl.unwrap_or(3) as u32)?),
+        Some(ParquetCompression::Zstd) => parquet::basic::Compression::ZSTD(ZstdLevel::try_new(lvl.unwrap_or(3))?),
+        Some(ParquetCompression::Lzo) => { level_not_supported?; parquet::basic::Compression::LZO }
+        Some(ParquetCompression::Lz4) => { level_not_supported?; parquet::basic::Compression::LZ4 }
+        Some(ParquetCompression::Snappy) => { level_not_supported?; parquet::basic::Compression::SNAPPY }
+        Some(ParquetCompression::None) => { level_not_supported?; parquet::basic::Compression::UNCOMPRESSED }
+    };
+    Ok(compression)
+}
+
 fn perform_export(args: ExportArgs) {
     if args.query.is_some() && args.table.is_some() {
         eprintln!("Either query or table must be specified, but not both");
@@ -162,20 +190,15 @@ fn perform_export(args: ExportArgs) {
         process::exit(1);
     }
 
-    let compression = match args.compression {
-        None => parquet::basic::Compression::ZSTD,
-        Some(ParquetCompression::Brotli) => parquet::basic::Compression::BROTLI,
-        Some(ParquetCompression::Gzip) => parquet::basic::Compression::GZIP,
-        Some(ParquetCompression::Lzo) => parquet::basic::Compression::LZO,
-        Some(ParquetCompression::Lz4) => parquet::basic::Compression::LZ4,
-        Some(ParquetCompression::Snappy) => parquet::basic::Compression::SNAPPY,
-        Some(ParquetCompression::Zstd) => parquet::basic::Compression::ZSTD,
-        Some(ParquetCompression::None) => parquet::basic::Compression::UNCOMPRESSED
-    };
+    let compression = get_compression(&args).unwrap_or_else(|e| {
+        eprintln!("Invalid combination of compression and compression_level: {}", e);
+        process::exit(1);
+    });
+
     let props =
         parquet::file::properties::WriterProperties::builder()
             .set_compression(compression)
-            .set_created_by("pg2parquet".to_owned())
+            .set_created_by(format!("pg2parquet version {}, using {}", env!("CARGO_PKG_VERSION"), parquet::file::properties::DEFAULT_CREATED_BY))
         .build();
     let props = Arc::new(props);
 
