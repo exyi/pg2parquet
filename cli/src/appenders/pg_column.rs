@@ -43,10 +43,10 @@ impl<TPg, TInner> ColumnAppenderBase for BasicPgRowColumnAppender<TPg, TInner>
 	fn max_rl(&self) -> i16 { self.appender.max_rl() }
 }
 
-impl<TPg, TAppender, TRow: PgAbstractRow> ColumnAppender<Arc<TRow>> for BasicPgRowColumnAppender<TPg, TAppender>
+impl<TPg, TAppender, TRow: PgAbstractRow + Clone> ColumnAppender<TRow> for BasicPgRowColumnAppender<TPg, TAppender>
 	where TPg: for<'a> FromSql<'a> + Clone, TAppender: ColumnAppender<TPg> {
 
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<Arc<TRow>>) -> Result<usize, String> {
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<TRow>) -> Result<usize, String> {
 		debug_assert_eq!(repetition_index.level, self.appender.max_rl());
 
 		let v = reader.ab_get::<Option<TPg>>(self.column_i);

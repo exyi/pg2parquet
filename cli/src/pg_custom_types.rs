@@ -61,6 +61,7 @@ impl<'a> FromSql<'a> for PgAny {
 
 	fn accepts(_ty: &postgres::types::Type) -> bool { true }
 }
+#[derive(Debug, Clone)]
 pub struct PgAnyRef<'a> {
 	pub ty: postgres::types::Type,
 	pub value: &'a [u8]
@@ -307,5 +308,23 @@ impl<TRow: PgAbstractRow> PgAbstractRow for Arc<TRow> {
 
     fn ab_len(&self) -> usize {
         self.as_ref().ab_len()
+    }
+}
+
+pub struct UnclonableHack<T>(pub T);
+
+impl<T> Clone for UnclonableHack<T> {
+	fn clone(&self) -> Self {
+		panic!("Cloning of type {} is disabled", std::any::type_name::<T>())
+	}
+}
+
+impl<TRow: PgAbstractRow> PgAbstractRow for UnclonableHack<TRow> {
+    fn ab_get<'a, T: postgres::types::FromSql<'a>>(&'a self, index: usize) -> T {
+        self.0.ab_get(index)
+    }
+
+    fn ab_len(&self) -> usize {
+        self.0.ab_len()
     }
 }

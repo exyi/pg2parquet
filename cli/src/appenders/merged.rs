@@ -1,17 +1,17 @@
 use std::{sync::Arc, borrow::Cow, marker::PhantomData};
 
-use crate::{postgres_cloner::DynRowAppender, level_index::LevelIndexList, myfrom::MyFrom};
+use crate::{level_index::LevelIndexList, myfrom::MyFrom};
 
-use super::{ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, GenericColumnAppender};
+use super::{ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, GenericColumnAppender, DynColumnAppender};
 
 pub struct DynamicMergedAppender<T> {
-	columns: Vec<DynRowAppender<T>>,
+	columns: Vec<DynColumnAppender<T>>,
 	max_dl: i16,
 	max_rl: i16
 }
 
 impl<T> DynamicMergedAppender<T> {
-	pub fn new(columns: Vec<DynRowAppender<T>>, max_dl: i16, max_rl: i16) -> Self {
+	pub fn new(columns: Vec<DynColumnAppender<T>>, max_dl: i16, max_rl: i16) -> Self {
 		DynamicMergedAppender { columns, max_dl, max_rl }
 	}
 }
@@ -41,8 +41,8 @@ impl<T> ColumnAppenderBase for DynamicMergedAppender<T> {
 	}
 }
 
-impl<T> ColumnAppender<Arc<T>> for DynamicMergedAppender<T> {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<Arc<T>>) -> Result<usize, String> {
+impl<T: Clone> ColumnAppender<T> for DynamicMergedAppender<T> {
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<T>) -> Result<usize, String> {
 		let mut total = 0;
 		let reader_r = reader.as_ref();
 		for c in self.columns.iter_mut() {

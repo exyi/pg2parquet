@@ -20,17 +20,16 @@ use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr, GroupTypeBuilder};
 
 use crate::PostgresConnArgs;
-use crate::appenders::{ColumnAppender, DynamicMergedAppender, RealMemorySize, ArrayColumnAppender, ColumnAppenderBase, GenericColumnAppender, BasicPgRowColumnAppender, RcWrapperAppender, StaticMergedAppender, new_autoconv_generic_appender, PreprocessExt, new_static_merged_appender};
+use crate::appenders::{ColumnAppender, DynamicMergedAppender, RealMemorySize, ArrayColumnAppender, ColumnAppenderBase, GenericColumnAppender, BasicPgRowColumnAppender, RcWrapperAppender, StaticMergedAppender, new_autoconv_generic_appender, PreprocessExt, new_static_merged_appender, DynColumnAppender};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::new_decimal_bytes_appender;
 use crate::myfrom::{MyFrom, self};
 use crate::parquet_writer::{WriterStats, ParquetRowWriter, WriterSettings};
-use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef};
+use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef, UnclonableHack};
 
-pub type DynRowAppender<TRow> = Box<dyn ColumnAppender<Arc<TRow>>>;
-type ResolvedColumn<TRow> = (DynRowAppender<TRow>, ParquetType);
+type ResolvedColumn<TRow> = (DynColumnAppender<TRow>, ParquetType);
 
 #[derive(Clone, Debug)]
 pub struct SchemaSettings {
@@ -230,20 +229,20 @@ fn count_columns(p: &ParquetType) -> usize {
 }
 
 
-fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<Row>, String> {
-	let mut fields: Vec<ResolvedColumn<Row>> = vec![];
+fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<Arc<Row>>, String> {
+	let mut fields: Vec<ResolvedColumn<Arc<Row>>> = vec![];
 	for (col_i, c) in row.iter().enumerate() {
 
 		let t = c.type_();
 
-		let schema = map_schema_column(t, &ColumnInfo::root(col_i, c.name().to_owned()), s, ReadPgColumnCallback::<Row>::new())?;
+		let schema = map_schema_column(t, &ColumnInfo::root(col_i, c.name().to_owned()), s)?;
 		fields.push(schema)
 	}
 
 
 	let (column_appenders, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
 
-	let merged_appender: DynRowAppender<Row> = Box::new(DynamicMergedAppender::new(column_appenders, 0, 0));
+	let merged_appender: DynColumnAppender<Arc<Row>> = Box::new(DynamicMergedAppender::new(column_appenders, 0, 0));
 	let struct_type = ParquetType::group_type_builder("root")
 		.with_fields(&mut parquet_types.into_iter().map(Arc::new).collect())
 		.build()
@@ -252,33 +251,32 @@ fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedCol
 	Ok((merged_appender, struct_type))
 }
 
-fn map_schema_column<Callback: AppenderCallback>(
+fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 	t: &PgType,
 	c: &ColumnInfo,
 	settings: &SchemaSettings,
-	callback: Callback
-) -> Result<(Callback::TResult, ParquetType), String> {
+) -> Result<ResolvedColumn<TRow>, String> {
 	match t.kind() {
 		Kind::Simple =>
-			map_simple_type(t, c, settings, callback),
+			map_simple_type(t, c, settings),
 		Kind::Enum(ref _enum_data) =>
 			match settings.enum_handling {
 				SchemaSettingsEnumHandling::Int =>
-					Ok(resolve_primitive::<PgEnum, Int32Type, _>(c.col_name(), c, callback, None, None)),
+					Ok(resolve_primitive::<PgEnum, Int32Type, _>(c.col_name(), c, None, None)),
 				SchemaSettingsEnumHandling::Text | SchemaSettingsEnumHandling::PlainText => {
 					let logical_type = if settings.enum_handling == SchemaSettingsEnumHandling::Text {
 						LogicalType::Enum
 					} else {
 						LogicalType::String
 					};
-					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, callback, Some(logical_type), None))
+					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, Some(logical_type), None))
 				},
 			}
 		Kind::Array(ref element_type) => {
 			let list_column = c.nest("list", 0).as_array();
 			let element_column = list_column.nest("element", 0);
 
-			let (element_appender, element_schema) = map_schema_column(element_type, &element_column, settings, ReadPgColumnCallback::<PgAny>::new())?;
+			let (element_appender, element_schema) = map_schema_column(element_type, &element_column, settings)?;
 			
 			debug_assert_eq!(element_schema.name(), "element");
 			let list_schema = ParquetType::group_type_builder("list")
@@ -297,17 +295,15 @@ fn map_schema_column<Callback: AppenderCallback>(
 				.build().unwrap();
 			assert_eq!(element_appender.max_dl(), element_column.definition_level + 1);
 			assert_eq!(element_appender.max_rl(), element_column.repetition_level);
-			let array_appender = create_array_appender(element_appender, &c, callback);
-			// map_schema_column(element_type, &c.as_array(), s)
-			Ok((array_appender, schema))
+			let array_appender = create_array_appender(element_appender, &c);
+			Ok((Box::new(array_appender), schema))
 		},
 		Kind::Domain(ref element_type) => {
-			map_schema_column(element_type, c, settings, callback)
+			map_schema_column(element_type, c, settings)
 		},
 		&Kind::Range(ref element_type) => {
-			// cc.repetition_level += c.is_array as i16;
-			let col_lower = map_schema_column(element_type, &c.nest("lower", 0), settings, ReadPgColumnCallback::<PgRawRange>::new())?;
-			let col_upper = map_schema_column(element_type, &c.nest("upper", 1), settings, ReadPgColumnCallback::<PgRawRange>::new())?;
+			let col_lower = map_schema_column::<UnclonableHack<PgRawRange>>(element_type, &c.nest("lower", 0), settings)?;
+			let col_upper = map_schema_column::<UnclonableHack<PgRawRange>>(element_type, &c.nest("upper", 1), settings)?;
 
 			let schema = ParquetType::group_type_builder(c.col_name())
 				.with_fields(&mut vec![
@@ -321,37 +317,34 @@ fn map_schema_column<Callback: AppenderCallback>(
 				.build()
 				.unwrap();
 
-			// let appender = create_complex_appender::<PgRawRange, _>(c, callback, vec![
-			// 	col_lower.0,
-			// 	col_upper.0,
-			// 	col_lower_incl,
-			// 	col_upper_incl,
-			// 	col_is_empty,
-			// ]);
-			let appender = new_static_merged_appender::<Arc<PgRawRange>>(c.definition_level + 1, c.repetition_level)
+			let appender = new_static_merged_appender::<UnclonableHack<PgRawRange>>(c.definition_level + 1, c.repetition_level)
 				.add_appender(col_lower.0)
 				.add_appender(col_upper.0)
 				.add_appender_map(
 					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
-					|r| Cow::Owned(r.as_ref().lower_inclusive)
+					|r| Cow::Owned(r.0.lower_inclusive)
 				)
 				.add_appender_map(
 					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
-					|r| Cow::Owned(r.as_ref().upper_inclusive)
+					|r| Cow::Owned(r.0.upper_inclusive)
 				)
 				.add_appender_map(
 					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
-					|r| Cow::Owned(r.as_ref().is_empty)
-				);
+					|r| Cow::Owned(r.0.is_empty)
+				)
+				.preprocess(|x: Cow<PgRawRange>| match x {
+					Cow::Owned(x) => Cow::Owned(UnclonableHack(x)),
+					Cow::Borrowed(_) => panic!()
+				});
 
-			let appender_dyn = callback.f(c, RcWrapperAppender::new(appender));
+			let appender_dyn = wrap_pg_row_reader(c, appender);
 
-			Ok((appender_dyn, schema))
+			Ok((Box::new(appender_dyn), schema))
 		},
 		&Kind::Composite(ref fields) => {
 			let (mut column_appenders, mut parquet_types) = (vec![], vec![]);
 			for (i, f) in fields.into_iter().enumerate() {
-				let (c, t) = map_schema_column(f.type_(), &c.nest(f.name(), i), settings, ReadPgColumnCallback::new())?;
+				let (c, t) = map_schema_column(f.type_(), &c.nest(f.name(), i), settings)?;
 				column_appenders.push(c);
 				parquet_types.push(t);
 			}
@@ -362,31 +355,30 @@ fn map_schema_column<Callback: AppenderCallback>(
 				.build()
 				.unwrap();
 
-			let appender = create_complex_appender::<PgRawRecord, _>(c, callback, column_appenders);
+			let appender = create_complex_appender::<PgRawRecord, TRow>(c, column_appenders);
 
-			Ok((appender, schema))
+			Ok((Box::new(appender), schema))
 		}
 		_ => Err(format!("Could not map column {}, unsupported type: {}", c.full_name(), t))
 	}
 }
 
 
-fn map_simple_type<Callback: AppenderCallback>(
+fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 	t: &PgType,
 	c: &ColumnInfo,
 	s: &SchemaSettings,
-	callback: Callback,
-) -> Result<(Callback::TResult, ParquetType), String> {
+) -> Result<ResolvedColumn<TRow>, String> {
 	let name = c.col_name();
 
 	Ok(match t.name() {
-		"bool" => resolve_primitive::<bool, BoolType, _>(name, c, callback, None, None),
-		"int2" => resolve_primitive::<i16, Int32Type, _>(name, c, callback, Some(LogicalType::Integer { bit_width: 16, is_signed: true }), None),
-		"int4" => resolve_primitive::<i32, Int32Type, _>(name, c, callback, None, None),
-		"oid" => resolve_primitive::<u32, Int32Type, _>(name, c, callback, Some(LogicalType::Integer { bit_width: 32, is_signed: false }), None),
-		"int8" => resolve_primitive::<i64, Int64Type, _>(name, c, callback, None, None),
-		"float4" => resolve_primitive::<f32, FloatType, _>(name, c, callback, None, None),
-		"float8" => resolve_primitive::<f64, DoubleType, _>(name, c, callback, None, None),
+		"bool" => resolve_primitive::<bool, BoolType, _>(name, c, None, None),
+		"int2" => resolve_primitive::<i16, Int32Type, _>(name, c, Some(LogicalType::Integer { bit_width: 16, is_signed: true }), None),
+		"int4" => resolve_primitive::<i32, Int32Type, _>(name, c, None, None),
+		"oid" => resolve_primitive::<u32, Int32Type, _>(name, c, Some(LogicalType::Integer { bit_width: 32, is_signed: false }), None),
+		"int8" => resolve_primitive::<i64, Int64Type, _>(name, c, None, None),
+		"float4" => resolve_primitive::<f32, FloatType, _>(name, c, None, None),
+		"float8" => resolve_primitive::<f64, DoubleType, _>(name, c, None, None),
 		"numeric" => {
 			let scale = s.decimal_scale;
 			let precision = s.decimal_precision;
@@ -396,51 +388,51 @@ fn map_simple_type<Callback: AppenderCallback>(
 				.with_scale(scale)
 				.build().unwrap();
 			let cp = {
-	let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
-	callback.f(c, appender)
-};
+				let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
+				Box::new(wrap_pg_row_reader(c, appender))
+			};
 			(cp, schema)
 		},
-		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, callback, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
-		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, callback, Some(LogicalType::Integer { bit_width: 8, is_signed: false }), None),
-		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, callback, None, None),
+		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
+		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, Some(LogicalType::Integer { bit_width: 8, is_signed: false }), None),
+		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, None, None),
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
-			resolve_primitive::<String, ByteArrayType, _>(name, c, callback, None, Some(ConvertedType::UTF8)),
+			resolve_primitive::<String, ByteArrayType, _>(name, c, None, Some(ConvertedType::UTF8)),
 		"jsonb" | "json" =>
-			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, callback, Some(match s.json_handling {
+			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, Some(match s.json_handling {
 				SchemaSettingsJsonHandling::Text => LogicalType::String,
 				SchemaSettingsJsonHandling::TextMarkedAsJson => LogicalType::Json
 			}), None),
 		"timestamptz" =>
-			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, callback, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: true, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
+			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: true, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
 		"timestamp" =>
-			resolve_primitive::<chrono::NaiveDateTime, Int64Type, _>(name, c, callback, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: false, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
+			resolve_primitive::<chrono::NaiveDateTime, Int64Type, _>(name, c, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: false, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
 		"date" =>
-			resolve_primitive::<chrono::NaiveDate, Int32Type, _>(name, c, callback, Some(LogicalType::Date), None),
+			resolve_primitive::<chrono::NaiveDate, Int32Type, _>(name, c, Some(LogicalType::Date), None),
 		"time" =>
-			resolve_primitive::<chrono::NaiveTime, Int64Type, _>(name, c, callback, Some(LogicalType::Time { is_adjusted_to_u_t_c: false, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
+			resolve_primitive::<chrono::NaiveTime, Int64Type, _>(name, c, Some(LogicalType::Time { is_adjusted_to_u_t_c: false, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
 
 		"uuid" =>
-			resolve_primitive_conv::<uuid::Uuid, FixedLenByteArrayType, _, _>(name, c, callback, Some(16), Some(LogicalType::Uuid), None, |v| MyFrom::my_from(v)),
+			resolve_primitive_conv::<uuid::Uuid, FixedLenByteArrayType, _, _>(name, c, Some(16), Some(LogicalType::Uuid), None, |v| MyFrom::my_from(v)),
 
 		"macaddr" =>
 			match s.macaddr_handling {
 				SchemaSettingsMacaddrHandling::Text =>
-					resolve_primitive::<eui48::MacAddress, ByteArrayType, _>(name, c, callback, Some(LogicalType::String), None),
+					resolve_primitive::<eui48::MacAddress, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
 				SchemaSettingsMacaddrHandling::ByteArray =>
-					resolve_primitive_conv::<eui48::MacAddress, FixedLenByteArrayType, _, _>(name, c, callback, Some(6), None, None, |v| MyFrom::my_from(v)),
+					resolve_primitive_conv::<eui48::MacAddress, FixedLenByteArrayType, _, _>(name, c, Some(6), None, None, |v| MyFrom::my_from(v)),
 				SchemaSettingsMacaddrHandling::Int64 =>
-					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, callback, None, None),
+					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, None, None),
 			},
 		"inet" =>
-			resolve_primitive::<IpAddr, ByteArrayType, _>(name, c, callback, Some(LogicalType::String), None),
+			resolve_primitive::<IpAddr, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
 		"bit" | "varbit" =>
-			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, callback, Some(LogicalType::String), None),
+			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
 
 		"interval" =>
 			match s.interval_handling {
 				SchemaSettingsIntervalHandling::Interval =>
-					resolve_primitive_conv::<PgInterval, FixedLenByteArrayType, _, _>(name, c, callback, Some(12), None, Some(ConvertedType::INTERVAL), |v| MyFrom::my_from(v)),
+					resolve_primitive_conv::<PgInterval, FixedLenByteArrayType, _, _>(name, c, Some(12), None, Some(ConvertedType::INTERVAL), |v| MyFrom::my_from(v)),
 				SchemaSettingsIntervalHandling::Struct => {
 					let t = GroupTypeBuilder::new(c.col_name())
 						.with_repetition(Repetition::OPTIONAL)
@@ -454,7 +446,7 @@ fn map_simple_type<Callback: AppenderCallback>(
 						.add_appender_map(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.months))
 						.add_appender_map(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.days))
 						.add_appender_map(new_autoconv_generic_appender::<i64, Int64Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.microseconds));
-					(callback.f(c, appender), t)
+					(Box::new(wrap_pg_row_reader(c, appender)), t)
 				},
 			},
 
@@ -466,26 +458,24 @@ fn map_simple_type<Callback: AppenderCallback>(
 	})
 }
 
-fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, Callback: AppenderCallback>(
+fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + Clone + 'static>(
 	name: &str,
 	c: &ColumnInfo,
-	callback: Callback,
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>
-) -> (Callback::TResult, ParquetType)
+) -> ResolvedColumn<TRow>
 	where TDataType: DataType, TDataType::T : RealMemorySize + MyFrom<T> {
-	resolve_primitive_conv::<T, TDataType, _, Callback>(name, c, callback, None, logical_type, conv_type, |v| MyFrom::my_from(v))
+	resolve_primitive_conv::<T, TDataType, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v))
 }
 
-fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, Callback: AppenderCallback>(
+fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone + 'static>(
 	name: &str,
 	c: &ColumnInfo,
-	callback: Callback,
 	length: Option<i32>,
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
-) -> (Callback::TResult, ParquetType)
+) -> ResolvedColumn<TRow>
 	where TDataType: DataType, TDataType::T : RealMemorySize {
 	let mut c = c.clone();
 	c.definition_level += 1; // TODO: can we support NOT NULL fields?
@@ -510,41 +500,42 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, F
 	let t = t.with_logical_type(logical_type).build().unwrap();
 
 	let cp =
-		create_primitive_appender::<T, TDataType, _, _>(&c, callback, convert);
+		create_primitive_appender::<T, TDataType, _, _>(&c, convert);
 
-	(cp, t)
+	(Box::new(cp), t)
 }
-fn create_primitive_appender_simple<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow>(
+fn create_primitive_appender_simple<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + Clone + 'static>(
 	c: &ColumnInfo,
-) -> DynRowAppender<TRow>
+) -> DynColumnAppender<TRow>
 	where TDataType: DataType, TDataType::T: RealMemorySize + MyFrom<T> {
 	let mut c = c.clone();
 	c.definition_level += 1;
-	create_primitive_appender::<T, TDataType, _, _>(&c, ReadPgColumnCallback::<TRow>::new(), |x| TDataType::T::my_from(x))
+	Box::new(create_primitive_appender::<T, TDataType, _, TRow>(&c, |x| TDataType::T::my_from(x)))
 }
 
-fn create_primitive_appender<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, Callback: AppenderCallback>(
+fn create_primitive_appender<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone>(
 	c: &ColumnInfo,
-	callback: Callback,
 	convert: FConversion
-) -> Callback::TResult
+) -> impl ColumnAppender<TRow>
 	where TDataType: DataType, TDataType::T: RealMemorySize {
 	let basic_appender: GenericColumnAppender<T, TDataType, _> = GenericColumnAppender::new(c.definition_level, c.repetition_level, convert);
-	callback.f(c, basic_appender)
+	wrap_pg_row_reader(c, basic_appender)
 }
 
-fn create_complex_appender<T: for <'a> FromSql<'a> + Clone + 'static, Callback: AppenderCallback>(c: &ColumnInfo, callback: Callback, columns: Vec<DynRowAppender<T>>) -> Callback::TResult {
+fn create_complex_appender<T: for <'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo, columns: Vec<DynColumnAppender<Arc<T>>>) -> impl ColumnAppender<TRow> {
 	let main_cp = DynamicMergedAppender::new(columns, c.definition_level + 1, c.repetition_level);
-	let unwrapped = RcWrapperAppender::new(main_cp);
-	callback.f(c, unwrapped)
+	wrap_pg_row_reader(c, RcWrapperAppender::new(main_cp))
 }
 
-fn create_array_appender<Callback: AppenderCallback>(inner: DynRowAppender<PgAny>, c: &ColumnInfo, callback: Callback) -> Callback::TResult {
+fn create_array_appender<TRow: PgAbstractRow + Clone>(inner: DynColumnAppender<PgAny>, c: &ColumnInfo) -> impl ColumnAppender<TRow> {
 	let outer_dl = c.definition_level + 1;
 	debug_assert_eq!(outer_dl + 2, inner.max_dl());
-	let unwrapped_appender = RcWrapperAppender::new(inner);
-	let array_appender = ArrayColumnAppender::new(unwrapped_appender, true, true, outer_dl, c.repetition_level);
-	callback.f::<Vec<Option<PgAny>>, _>(c, array_appender)
+	let array_appender = ArrayColumnAppender::new(inner, true, true, outer_dl, c.repetition_level);
+	wrap_pg_row_reader::<TRow, Vec<Option<PgAny>>>(c, array_appender)
+}
+
+fn wrap_pg_row_reader<TRow: PgAbstractRow + Clone, T: Clone + for <'a> FromSql<'a>>(c: &ColumnInfo, a: impl ColumnAppender<T>) -> impl ColumnAppender<TRow> {
+	BasicPgRowColumnAppender::new(c.col_i, a)
 }
 
 #[derive(Debug, Clone)]
@@ -600,49 +591,4 @@ impl ColumnInfo {
 	}
 }
 
-/// Hack to allow us "return" a generic instance from a function
-/// The callback converts the generic object into a dynamic instance which can be used polymorphically
-trait AppenderCallback {
-	type TResult;
-	fn f<TPg, TAppender>(&self, c: &ColumnInfo, appender: TAppender) -> Self::TResult
-		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + Clone + 'static;
-}
-
-struct ReadPgColumnCallback<TRow> { _dummy: PhantomData<TRow> }
-impl<TRow> ReadPgColumnCallback<TRow> { fn new() -> Self { ReadPgColumnCallback{_dummy: PhantomData} } }
-impl<TRow: PgAbstractRow> AppenderCallback for ReadPgColumnCallback<TRow> {
-	type TResult = DynRowAppender<TRow>;
-	fn f<TPg, TAppender>(&self, c: &ColumnInfo, appender: TAppender) -> DynRowAppender<TRow>
-		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + Clone + 'static {
-		Box::new(BasicPgRowColumnAppender::new(c.col_i, appender))
-	}
-}
-
-// struct CreateSimpleCopierCallback<T> { _dummy: PhantomData<T> }
-// impl<TRow> CreateSimpleCopierCallback<TRow> { fn new() -> Self { CreateSimpleCopierCallback{_dummy: PhantomData} } }
-// impl<T: PgAbstractRow> AppenderCallback for CreateSimpleCopierCallback<T> {
-// 	type TResult = DynColumnAppender<T>;
-// 	fn f<TPg, TAppender>(&self, c: &ColumnInfo, appender: TAppender) -> DynColumnAppender<T>
-// 		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + 'static {
-// 		Box::new(BasicPgRowColumnAppender::new(c.col_i, appender))
-// 	}
-// }
-
-// struct ReturnCallback { }
-// impl AppenderCallback for ReturnCallback {
-// 	type TResult = TAppender;
-// 	fn f<TPg, TAppender>(&self, _: &ColumnInfo, _: TAppender) -> ()
-// 		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + Clone + 'static {
-// 		()
-// 	}
-// }
-
-struct NopCallback { }
-impl AppenderCallback for NopCallback {
-	type TResult = ();
-	fn f<TPg, TAppender>(&self, _: &ColumnInfo, _: TAppender) -> ()
-		where TAppender: ColumnAppender<TPg> + 'static, TPg: for <'a> FromSql<'a> + Clone + 'static {
-		()
-	}
-}
 

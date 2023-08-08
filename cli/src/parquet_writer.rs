@@ -2,7 +2,7 @@ use std::{io::Write, cell::RefCell, sync::Arc, mem, borrow::Cow, rc::Rc};
 
 use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
 
-use crate::{level_index::LevelIndexList, postgresutils::identify_row, pg_custom_types::PgAbstractRow, postgres_cloner::DynRowAppender, appenders::{new_dynamic_serialized_writer, Arcell}};
+use crate::{level_index::LevelIndexList, postgresutils::identify_row, pg_custom_types::PgAbstractRow, appenders::{new_dynamic_serialized_writer, Arcell, DynColumnAppender}};
 
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct ParquetRowWriter<W: Write + Send> {
 	writer: SerializedFileWriter<W>,
 	schema: parquet::schema::types::TypePtr,
 	// row_group_writer: SerializedRowGroupWriter<'a, W>,
-	appender: DynRowAppender<postgres::Row>,
+	appender: DynColumnAppender<Arc<postgres::Row>>,
 	stats: WriterStats,
 	settings: WriterSettings,
 	current_group_bytes: usize,
@@ -33,7 +33,7 @@ impl <W: Write + Send> ParquetRowWriter<W> {
 	pub fn new(
 		writer: SerializedFileWriter<W>,
 		schema: parquet::schema::types::TypePtr,
-		appender: DynRowAppender<postgres::Row>,
+		appender: DynColumnAppender<Arc<postgres::Row>>,
 		settings: WriterSettings
 	) -> parquet::errors::Result<Self> {
 		// let mut row_group_writer = writer.next_row_group()?;
