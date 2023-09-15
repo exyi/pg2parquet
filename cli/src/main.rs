@@ -227,8 +227,8 @@ fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |x| {
         default_hook(x);
-        println!();
-        println!("pg2parquet probably should not crash in this way, could you please report a bug at https://github.com/exyi/pg2parquet/issues/new (ideally with the backtrace and some info on what you did)?");
+        eprintln!();
+        eprintln!("pg2parquet probably should not crash in this way, could you please report a bug at https://github.com/exyi/pg2parquet/issues/new (ideally with the backtrace and some info on what you did)?");
     }));
     let args = parse_args();
 
