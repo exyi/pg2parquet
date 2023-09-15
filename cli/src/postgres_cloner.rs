@@ -25,7 +25,7 @@ use crate::appenders::{ColumnAppender, DynamicMergedAppender, RealMemorySize, Ar
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
-use crate::datatypes::numeric::new_decimal_bytes_appender;
+use crate::datatypes::numeric::{new_decimal_bytes_appender, new_decimal_int_appender};
 use crate::myfrom::{MyFrom, self};
 use crate::parquet_writer::{WriterStats, ParquetRowWriter, WriterSettings};
 use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef, UnclonableHack};
@@ -390,12 +390,25 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		"numeric" => {
 			let scale = s.decimal_scale;
 			let precision = s.decimal_precision;
-			let schema = ParquetType::primitive_type_builder(name, basic::Type::BYTE_ARRAY)
+			let pq_type = if precision <= 9 {
+				basic::Type::INT32
+			} else if precision <= 18 {
+				basic::Type::INT64
+			} else {
+				basic::Type::BYTE_ARRAY
+			};
+			let schema = ParquetType::primitive_type_builder(name, pq_type)
 				.with_logical_type(Some(LogicalType::Decimal { scale, precision: precision as i32 }))
 				.with_precision(precision as i32)
 				.with_scale(scale)
 				.build().unwrap();
-			let cp = {
+			let cp: DynColumnAppender<TRow> = if pq_type == basic::Type::INT32 {
+				let appender = new_decimal_int_appender::<i32, Int32Type>(c.definition_level + 1, c.repetition_level, precision, scale);
+				Box::new(wrap_pg_row_reader(c, appender))
+			} else if pq_type == basic::Type::INT64 {
+				let appender = new_decimal_int_appender::<i64, Int64Type>(c.definition_level + 1, c.repetition_level, precision, scale);
+				Box::new(wrap_pg_row_reader(c, appender))
+			} else {
 				let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
 				Box::new(wrap_pg_row_reader(c, appender))
 			};

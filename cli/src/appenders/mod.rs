@@ -4,7 +4,7 @@ pub use array::ArrayColumnAppender;
 pub use real_memory_size::RealMemorySize;
 pub use pg_column::BasicPgRowColumnAppender;
 pub use merged::{DynamicMergedAppender, StaticMergedAppender, new_static_merged_appender};
-pub use helpers::{PreprocessAppender, PreprocessExt, RcWrapperAppender};
+pub use helpers::{UnwrapOptionAppender, PreprocessAppender, PreprocessExt, RcWrapperAppender};
 
 mod interface;
 mod generic;

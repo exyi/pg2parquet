@@ -4,6 +4,38 @@ use crate::level_index::LevelIndexList;
 
 use super::{ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter};
 
+pub struct UnwrapOptionAppender<T: Clone, Appender2: ColumnAppender<T>> {
+    appender: Appender2,
+    _dummy: PhantomData<T>
+}
+impl<T: Clone, Appender2: ColumnAppender<T>> UnwrapOptionAppender<T, Appender2> {
+    pub fn new(appender: Appender2) -> Self {
+        UnwrapOptionAppender { appender, _dummy: PhantomData }
+    }
+}
+impl<T: Clone, Appender2: ColumnAppender<T>> ColumnAppenderBase for UnwrapOptionAppender<T, Appender2> {
+    fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+        self.appender.write_null(repetition_index, level)
+    }
+
+    fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
+        self.appender.write_columns(column_i, next_col)
+    }
+
+    fn max_dl(&self) -> i16 {
+        self.appender.max_dl()
+    }
+
+    fn max_rl(&self) -> i16 {
+        self.appender.max_rl()
+    }
+}
+impl<T: Clone, Appender2: ColumnAppender<T>> ColumnAppender<Option<T>> for UnwrapOptionAppender<T, Appender2> {
+    fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<Option<T>>) -> Result<usize, String> {
+        self.appender.copy_value_opt(repetition_index, value)
+    }
+}
+
 pub struct PreprocessAppender<T1: Clone, T2: Clone, Appender2: ColumnAppender<T2>, F: Fn(Cow<T1>) -> Cow<T2>> {
     appender: Appender2,
     f: F,

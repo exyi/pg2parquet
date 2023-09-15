@@ -128,6 +128,32 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(list(pd_df["normal"]), [Decimal('1000.000100000000000000'), None])
         self.assertEqual(list(pd_df["high_precision"]), [Decimal('1.00000000000000000000000000000000000000000001'), None])
 
+    def test_numeric_i32(self):
+        file = wrappers.create_and_export(
+            "numeric_types", "id",
+            "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
+            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
+            options=["--decimal-precision=9", "--decimal-scale=4"]
+        )
+        duckdb_table = duckdb.read_parquet(file).fetchall()
+        self.assertEqual(duckdb_table, [
+            (1, Decimal('1000.000100000000000000'), Decimal('1.000000000000000000')),
+            (2,  None, None ) # parquet doesn't support NaN, so NULL it is
+        ])
+
+    def test_numeric_i64(self):
+        file = wrappers.create_and_export(
+            "numeric_types", "id",
+            "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
+            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
+            options=["--decimal-precision=18", "--decimal-scale=9"]
+        )
+        duckdb_table = duckdb.read_parquet(file).fetchall()
+        self.assertEqual(duckdb_table, [
+            (1, Decimal('1000.000100000000000000'), Decimal('1.000000000000000000')),
+            (2,  None, None ) # parquet doesn't support NaN, so NULL it is
+        ])
+
     def test_bytes(self):
         file = wrappers.create_and_export(
             "bytes_types", "id",
