@@ -2,6 +2,8 @@ import datetime
 from decimal import Decimal
 import math
 import uuid
+
+import numpy as np
 import wrappers
 import unittest
 import duckdb
@@ -11,12 +13,13 @@ import pandas as pd
 wrappers.run_sql(
     """CREATE TYPE weekday AS ENUM ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday');""",
     """CREATE TYPE weekday_range AS RANGE (subtype = weekday);""",
+    """CREATE TYPE chain_id AS (pdbid char(4), model int, chain char(1));""",
 )
 
 class TestBasic(unittest.TestCase):
     def test_enums_text(self):
         file = wrappers.create_and_export(
-            "custom_enums", "id",
+            "custom_enums_text", "id",
             "id int, a weekday, b weekday[]",
             """(1, 'monday', ARRAY['monday'::weekday, 'tuesday']),
                (2, NULL, NULL),
@@ -40,7 +43,7 @@ class TestBasic(unittest.TestCase):
 
     def test_enums_plaintext(self):
         file = wrappers.create_and_export(
-            "custom_enums", "id",
+            "custom_enums_plaintext", "id",
             "id int, a weekday, b weekday[]",
             """(1, 'monday', ARRAY['monday'::weekday, 'tuesday']),
                (2, NULL, NULL),
@@ -65,7 +68,7 @@ class TestBasic(unittest.TestCase):
 
     def test_enums_int(self):
         file = wrappers.create_and_export(
-            "custom_enums", "id",
+            "custom_enums_int", "id",
             "id int, a weekday, b weekday[]",
             """(1, 'monday', ARRAY['monday'::weekday, 'tuesday']),
                (2, NULL, NULL),
@@ -128,4 +131,53 @@ class TestBasic(unittest.TestCase):
             "b": range_struct,
             "c": pl.List(range_struct)
         })
+
+    def test_composite_type_simple(self):
+        self.maxDiff = None
+        file = wrappers.create_and_export(
+            "custom_composite_type_simple", "id",
+            "id int, a chain_id, b chain_id[]",
+            """(1, ROW('1ehz', 1, 'A'), '{}'),
+               (2, NULL, NULL),
+               (3, '(,,)', ARRAY[NULL::chain_id, '(1ehz,1,A)', '(,,A)'])
+            """)
+        duckdb_table = duckdb.read_parquet(file).fetchall()
+        self.assertEqual(duckdb_table[0], (1, {'pdbid': '1ehz', 'model': 1, 'chain': 'A'}, []))
+        self.assertEqual(duckdb_table[1], (2, None, None))
+        self.assertEqual(duckdb_table[2], (3, {'chain': None, 'model': None, 'pdbid': None}, [None, {'pdbid': '1ehz', 'model': 1, 'chain': 'A'}, {'pdbid': None, 'model': None, 'chain': 'A'}]))
+
+        pl_df = pl.read_parquet(file)
+        self.assertEqual(pl_df.schema, {
+            "id": pl.Int32,
+            "a": pl.Struct({
+                "pdbid": pl.Utf8,
+                "model": pl.Int32,
+                "chain": pl.Utf8,
+            }),
+            "b": pl.List(pl.Struct({
+                "pdbid": pl.Utf8,
+                "model": pl.Int32,
+                "chain": pl.Utf8,
+            }))
+        })
+        self.assertEqual(pl_df["id"].to_list(), [1, 2, 3])
+        self.assertEqual(pl_df["a"].to_list(), [
+            {'pdbid': '1ehz', 'model': 1, 'chain': 'A'},
+            {'pdbid': None, 'model': None, 'chain': None}, # polars just doesn't support null structs
+            {'pdbid': None, 'model': None, 'chain': None}
+        ])
+        self.assertEqual(pl_df["b"].to_list(), [
+            [],
+            None,
+            [ {'pdbid': None, 'model': None, 'chain': None}, {'pdbid': '1ehz', 'model': 1, 'chain': 'A'}, {'pdbid': None, 'model': None, 'chain': 'A'}]
+        ])
+
+        pd_df = pd.read_parquet(file)
+        pd_rows = [*pd_df.itertuples()]
+        self.assertEqual(tuple(pd_rows[0])[:-1], (0, 1, {'pdbid': '1ehz', 'model': 1.0, 'chain': 'A'}))
+        self.assertEqual(list(tuple(pd_rows[0])[-1]), [])
+        self.assertEqual(tuple(pd_rows[1]), (1, 2, None, None))
+        self.assertEqual(tuple(pd_rows[2])[:-1], (2, 3, {'pdbid': None, 'model': None, 'chain': None}))
+        self.assertEqual(list(tuple(pd_rows[2])[-1]), [None, {'pdbid': '1ehz', 'model': 1.0, 'chain': 'A'}, {'pdbid': None, 'model': None, 'chain': 'A'}])
+
 
