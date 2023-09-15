@@ -14,6 +14,7 @@ use parquet::data_type::{DataType, BoolType, Int32Type, Int64Type, FloatType, Do
 use parquet::file::properties::WriterPropertiesPtr;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::format::TimestampType;
+use pg_bigdecimal::PgNumeric;
 use postgres::error::SqlState;
 use postgres::types::{Kind, Type as PgType, FromSql};
 use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
@@ -38,6 +39,7 @@ pub struct SchemaSettings {
 	pub json_handling: SchemaSettingsJsonHandling,
 	pub enum_handling: SchemaSettingsEnumHandling,
 	pub interval_handling: SchemaSettingsIntervalHandling,
+	pub numeric_handling: SchemaSettingsNumericHandling,
 	pub decimal_scale: i32,
 	pub decimal_precision: u32,
 }
@@ -78,12 +80,26 @@ pub enum SchemaSettingsIntervalHandling {
 	Struct
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum SchemaSettingsNumericHandling {
+	/// Numeric is stored using the DECIMAL parquet type. Use --decimal-precision and --decimal-scale to set the desired precision and scale.
+	Decimal,
+	/// Numeric is converted to float64 (DOUBLE).
+	#[clap(alias="float", alias="float64")]
+	Double,
+	/// Numeric is converted to float32 (FLOAT).
+	Float32,
+	/// Convert the numeric to a string and store it as UTF8 text. This option never looses precision. Note that text "NaN" may be present if NaN is present in the database.
+	String
+}
+
 pub fn default_settings() -> SchemaSettings {
 	SchemaSettings {
 		macaddr_handling: SchemaSettingsMacaddrHandling::Text,
 		json_handling: SchemaSettingsJsonHandling::Text, // DuckDB doesn't load JSON converted type, so better to use string I guess
 		enum_handling: SchemaSettingsEnumHandling::Text,
 		interval_handling: SchemaSettingsIntervalHandling::Interval,
+		numeric_handling: SchemaSettingsNumericHandling::Decimal,
 		decimal_scale: 18,
 		decimal_precision: 38,
 	}
@@ -388,31 +404,7 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		"float4" => resolve_primitive::<f32, FloatType, _>(name, c, None, None),
 		"float8" => resolve_primitive::<f64, DoubleType, _>(name, c, None, None),
 		"numeric" => {
-			let scale = s.decimal_scale;
-			let precision = s.decimal_precision;
-			let pq_type = if precision <= 9 {
-				basic::Type::INT32
-			} else if precision <= 18 {
-				basic::Type::INT64
-			} else {
-				basic::Type::BYTE_ARRAY
-			};
-			let schema = ParquetType::primitive_type_builder(name, pq_type)
-				.with_logical_type(Some(LogicalType::Decimal { scale, precision: precision as i32 }))
-				.with_precision(precision as i32)
-				.with_scale(scale)
-				.build().unwrap();
-			let cp: DynColumnAppender<TRow> = if pq_type == basic::Type::INT32 {
-				let appender = new_decimal_int_appender::<i32, Int32Type>(c.definition_level + 1, c.repetition_level, precision, scale);
-				Box::new(wrap_pg_row_reader(c, appender))
-			} else if pq_type == basic::Type::INT64 {
-				let appender = new_decimal_int_appender::<i64, Int64Type>(c.definition_level + 1, c.repetition_level, precision, scale);
-				Box::new(wrap_pg_row_reader(c, appender))
-			} else {
-				let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
-				Box::new(wrap_pg_row_reader(c, appender))
-			};
-			(cp, schema)
+			resolve_numeric(s, name, c)?
 		},
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, Some(LogicalType::Integer { bit_width: 8, is_signed: false }), None),
@@ -477,6 +469,48 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		n => 
 			return Err(format!("Could not map column {}, unsupported primitive type: {}", c.full_name(), n)),
 	})
+}
+
+fn resolve_numeric<TRow: PgAbstractRow + Clone + 'static>(s: &SchemaSettings, name: &str, c: &ColumnInfo) -> Result<ResolvedColumn<TRow>, String> {
+	match s.numeric_handling {
+		SchemaSettingsNumericHandling::Decimal => {
+			let scale = s.decimal_scale;
+			let precision = s.decimal_precision;
+			let pq_type = if precision <= 9 {
+				basic::Type::INT32
+			} else if precision <= 18 {
+				basic::Type::INT64
+			} else {
+				basic::Type::BYTE_ARRAY
+			};
+		let schema = ParquetType::primitive_type_builder(name, pq_type)
+				.with_logical_type(Some(LogicalType::Decimal { scale, precision: precision as i32 }))
+				.with_precision(precision as i32)
+				.with_scale(scale)
+				.build().unwrap();
+		let cp: DynColumnAppender<TRow> = if pq_type == basic::Type::INT32 {
+				let appender = new_decimal_int_appender::<i32, Int32Type>(c.definition_level + 1, c.repetition_level, precision, scale);
+				Box::new(wrap_pg_row_reader(c, appender))
+			} else if pq_type == basic::Type::INT64 {
+				let appender = new_decimal_int_appender::<i64, Int64Type>(c.definition_level + 1, c.repetition_level, precision, scale);
+				Box::new(wrap_pg_row_reader(c, appender))
+			} else {
+				let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
+				Box::new(wrap_pg_row_reader(c, appender))
+			};
+			Ok((cp, schema))
+		},
+
+		SchemaSettingsNumericHandling::Double =>
+			Ok(resolve_primitive::<PgNumeric, DoubleType, _>(name, c, None, None)),
+		SchemaSettingsNumericHandling::Float32 =>
+			Ok(resolve_primitive::<PgNumeric, FloatType, _>(name, c, None, None)),
+		SchemaSettingsNumericHandling::String =>
+			Ok(resolve_primitive_conv::<PgNumeric, ByteArrayType, _, _>(name, c, None, Some(LogicalType::String), None, |v: PgNumeric| match v.n {
+				Some(n) => ByteArray::my_from(n.to_string()),
+				None => ByteArray::my_from("NaN".to_string())
+			}))
+	}
 }
 
 fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + Clone + 'static>(

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal, BigInt};
+use bigdecimal::ToPrimitive;
 
 use crate::appenders::{GenericColumnAppender, ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter, new_autoconv_generic_appender, PreprocessExt, PreprocessAppender, UnwrapOptionAppender};
 use crate::level_index::LevelIndexList;
@@ -75,6 +76,25 @@ impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppender<PgNumeric> for DecimalBytes
 		};
 		self.inner.copy_value_opt(repetition_index, Cow::Owned(bytes))
 	}
+}
+
+impl MyFrom<PgNumeric> for f64 {
+    fn my_from(t: PgNumeric) -> Self {
+        match t.n {
+			Some(n) => n.to_string().parse().unwrap(), // for some reason the to_f64 method works poorly (looses more precision)
+			// Some(n) => n.to_f64().unwrap(),
+			None => f64::NAN,
+		}
+    }
+}
+impl MyFrom<PgNumeric> for f32 {
+    fn my_from(t: PgNumeric) -> Self {
+        match t.n {
+			Some(n) => n.to_string().parse().unwrap(),
+			// Some(n) => n.to_f32().unwrap(),
+			None => f32::NAN,
+		}
+    }
 }
 
 // #[derive(Clone)]

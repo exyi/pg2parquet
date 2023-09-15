@@ -4,7 +4,7 @@ use std::{sync::Arc, path::PathBuf, process};
 
 use clap::{Parser, ValueEnum, Command};
 use parquet::basic::{ZstdLevel, BrotliLevel, GzipLevel};
-use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling, SchemaSettingsEnumHandling, SchemaSettingsIntervalHandling};
+use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling, SchemaSettingsEnumHandling, SchemaSettingsIntervalHandling, SchemaSettingsNumericHandling};
 
 mod postgresutils;
 mod myfrom;
@@ -115,10 +115,13 @@ pub struct SchemaSettingsArgs {
     /// How to handle `interval` columns
     #[arg(long, hide_short_help = true, default_value = "interval")]
     interval_handling: SchemaSettingsIntervalHandling,
+    /// How to handle `numeric` columns
+    #[arg(long, hide_short_help = true, default_value = "decimal")]
+    numeric_handling: SchemaSettingsNumericHandling,
     /// How many decimal digits after the decimal point are stored in the Parquet file
     #[arg(long, hide_short_help = true, default_value_t = 18)]
 	decimal_scale: i32,
-    /// How many decimal digits are allowed in numeric/DECIMAL column. By default 38, the largest value which fits in 128 bits.
+    /// How many decimal digits are allowed in numeric/DECIMAL column. By default 38, the largest value which fits in 128 bits. If <= 9, the column is stored as INT32; if <= 18, the column is stored as INT64; otherwise BYTE_ARRAY.
     #[arg(long, hide_short_help = true, default_value_t = 38)]
 	decimal_precision: u32,
 }
@@ -207,6 +210,7 @@ fn perform_export(args: ExportArgs) {
         json_handling: args.schema_settings.json_handling,
         enum_handling: args.schema_settings.enum_handling,
         interval_handling: args.schema_settings.interval_handling,
+        numeric_handling: args.schema_settings.numeric_handling,
         decimal_scale: args.schema_settings.decimal_scale,
         decimal_precision: args.schema_settings.decimal_precision,
     };

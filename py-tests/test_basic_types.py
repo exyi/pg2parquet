@@ -138,7 +138,7 @@ class TestBasic(unittest.TestCase):
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
             (1, Decimal('1000.000100000000000000'), Decimal('1.000000000000000000')),
-            (2,  None, None ) # parquet doesn't support NaN, so NULL it is
+            (2,  None, None )
         ])
 
     def test_numeric_i64(self):
@@ -151,7 +151,48 @@ class TestBasic(unittest.TestCase):
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
             (1, Decimal('1000.000100000000000000'), Decimal('1.000000000000000000')),
-            (2,  None, None ) # parquet doesn't support NaN, so NULL it is
+            (2,  None, None )
+        ])
+    def test_numeric_f64(self):
+        file = wrappers.create_and_export(
+            "numeric_types", "id",
+            "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
+            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
+            options=["--numeric-handling=double"]
+        )
+        duckdb_table = duckdb.read_parquet(file).fetchall()
+        self.assertEqual(duckdb_table[0], (1, 1000.0001, 1))
+        self.assertTrue(math.isnan(duckdb_table[1][1]))
+        self.assertTrue(math.isnan(duckdb_table[1][2]))
+        schema = pl.read_parquet(file).schema
+        self.assertEqual(schema["normal"], pl.Float64)
+        self.assertEqual(schema["high_precision"], pl.Float64)
+
+    def test_numeric_f32(self):
+        file = wrappers.create_and_export(
+            "numeric_types", "id",
+            "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
+            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
+            options=["--numeric-handling=float32"]
+        )
+        duckdb_table = duckdb.read_parquet(file).fetchall()
+        self.assertEqual(duckdb_table[0], (1, 1000.0001220703125, 1))
+        self.assertTrue(math.isnan(duckdb_table[1][1]))
+        self.assertTrue(math.isnan(duckdb_table[1][2]))
+        schema = pl.read_parquet(file).schema
+        self.assertEqual(schema["normal"], pl.Float32)
+        self.assertEqual(schema["high_precision"], pl.Float32)
+    def test_numeric_string(self):
+        file = wrappers.create_and_export(
+            "numeric_types", "id",
+            "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
+            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
+            options=["--numeric-handling=string"]
+        )
+        duckdb_table = duckdb.read_parquet(file).fetchall()
+        self.assertEqual(duckdb_table, [
+            (1, '1000.00010', '1.0000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000'),
+            (2, 'NaN', 'NaN' )
         ])
 
     def test_bytes(self):

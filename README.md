@@ -54,7 +54,7 @@ You can also use environment variables `$PGPASSWORD` and `$PGUSER`
 * **Basic SQL types**: `text`, `char`, `varchar` and friends, all kinds of `int`s, `bool`, floating point numbers, `timestamp`, `timestamptz`, `date`, `time`, `uuid`
   * `interval` - interval has lower precision in Parquet (ms) than in Postgres (µs), so the conversion is lossy. There is an option `--interval-handling=struct` which serializes it differently without rounding.
 * **Decimal numeric types**
-	* `numeric` will have fixed precision according to the `--decimal-scale` and `--decimal-precision` parameters
+	* `numeric` will have fixed precision according to the `--decimal-scale` and `--decimal-precision` parameters. Alternatively use `--numeric-handling` to write a float or string instead.
 	* `money` is always a 64-bit decimal with 2 decimal places
 * **`json` and `jsonb`**: by default serialized as a text field with the JSON. `--json-handling` option allows setting parquet LogicalType to [JSON](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md#json), but the feature is not widely supported, thus it's disabled by default.
 * **`xml`**: serialized as text
@@ -105,6 +105,9 @@ Options:
           
           [possible values: none, snappy, gzip, lzo, brotli, lz4, zstd]
 
+      --compression-level <COMPRESSION_LEVEL>
+          Compression level of the output file compressor. Only relevant for zstd, brotli and gzip. Default: 3
+
   -H, --host <HOST>
           Database server host
 
@@ -124,12 +127,9 @@ Options:
           Controls whether to use SSL/TLS to connect to the server
 
           Possible values:
-          - disable:
-            Do not use TLS
-          - prefer:
-            Attempt to connect with TLS but allow sessions without (default behavior compiled with SSL support)
-          - require:
-            Require the use of TLS
+          - disable: Do not use TLS
+          - prefer:  Attempt to connect with TLS but allow sessions without (default behavior compiled with SSL support)
+          - require: Require the use of TLS
 
       --macaddr-handling <MACADDR_HANDLING>
           How to handle `macaddr` columns
@@ -147,10 +147,8 @@ Options:
           [default: text]
 
           Possible values:
-          - text-marked-as-json:
-            JSON is stored as a Parquet JSON type. This is essentially the same as text, but with a different ConvertedType, so it may not be supported in all tools
-          - text:
-            JSON is stored as a UTF8 text
+          - text-marked-as-json: JSON is stored as a Parquet JSON type. This is essentially the same as text, but with a different ConvertedType, so it may not be supported in all tools
+          - text:                JSON is stored as a UTF8 text
 
       --enum-handling <ENUM_HANDLING>
           How to handle enum (Enumerated Type) columns
@@ -158,12 +156,9 @@ Options:
           [default: text]
 
           Possible values:
-          - text:
-            Enum is stored as the postgres enum name, Parquet LogicalType is set to ENUM
-          - plain-text:
-            Enum is stored as the postgres enum name, Parquet LogicalType is set to String
-          - int:
-            Enum is stored as an 32-bit integer (one-based index of the value in the enum definition)
+          - text:       Enum is stored as the postgres enum name, Parquet LogicalType is set to ENUM
+          - plain-text: Enum is stored as the postgres enum name, Parquet LogicalType is set to String
+          - int:        Enum is stored as an 32-bit integer (one-based index of the value in the enum definition)
 
       --interval-handling <INTERVAL_HANDLING>
           How to handle `interval` columns
@@ -171,10 +166,19 @@ Options:
           [default: interval]
 
           Possible values:
-          - interval:
-            Enum is stored as the Parquet INTERVAL type. This has lower precision than postgres interval (milliseconds instead of microseconds)
-          - struct:
-            Enum is stored as struct { months: i32, days: i32, microseconds: i64 }, exactly as PostgreSQL stores it
+          - interval: Enum is stored as the Parquet INTERVAL type. This has lower precision than postgres interval (milliseconds instead of microseconds)
+          - struct:   Enum is stored as struct { months: i32, days: i32, microseconds: i64 }, exactly as PostgreSQL stores it
+
+      --numeric-handling <NUMERIC_HANDLING>
+          How to handle `numeric` columns
+          
+          [default: decimal]
+
+          Possible values:
+          - decimal: Numeric is stored using the DECIMAL parquet type. Use --decimal-precision and --decimal-scale to set the desired precision and scale
+          - double:  Numeric is converted to float64 (DOUBLE)
+          - float32: Numeric is converted to float32 (FLOAT)
+          - string:  Convert the numeric to a string and store it as UTF8 text. This option never looses precision. Note that text "NaN" may be present if NaN is present in the database
 
       --decimal-scale <DECIMAL_SCALE>
           How many decimal digits after the decimal point are stored in the Parquet file
@@ -182,7 +186,7 @@ Options:
           [default: 18]
 
       --decimal-precision <DECIMAL_PRECISION>
-          How many decimal digits are allowed in numeric/DECIMAL column. By default 38, the largest value which fits in 128 bits
+          How many decimal digits are allowed in numeric/DECIMAL column. By default 38, the largest value which fits in 128 bits. If <= 9, the column is stored as INT32; if <= 18, the column is stored as INT64; otherwise BYTE_ARRAY
           
           [default: 38]
 
