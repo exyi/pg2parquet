@@ -28,7 +28,7 @@ byteorder = "1.4.3"
 [target.'cfg(not(any(target_family = "windows", target_arch = "riscv64")))'.dependencies]
 jemallocator = "0.5.4"
 
-[target.'cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64"))))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64"))))'.dependencies]
 postgres-native-tls = "0.5.0"
 native-tls = "0.2.11"
 
