@@ -6,7 +6,7 @@ readme = "../README.md"
 keywords = ["cli", "postgres", "parquet"]
 documentation = "https://github.com/exyi/pg2parquet"
 name = "pg2parquet"
-version = "0.1.0-beta.7"
+version = "0.1.0-beta.8"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

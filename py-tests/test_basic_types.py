@@ -99,8 +99,8 @@ class TestBasic(unittest.TestCase):
             "f32": pl.Float32,
             "f64": pl.Float64
         })
-        self.assertEqual(list(polars_df["f32"].cast(str)), ['1.1', 'NaN', 'inf', '-inf', '0.0'])
-        self.assertEqual(list(polars_df["f64"].cast(str)), ['2.2', 'NaN', 'inf', '-inf', '0.0'])
+        self.assertEqual(list(polars_df["f32"].cast(str)), ['1.1', 'NaN', 'inf', '-inf', '-0.0'])
+        self.assertEqual(list(polars_df["f64"].cast(str)), ['2.2', 'NaN', 'inf', '-inf', '-0.0'])
 
     def test_numeric(self):
         file = wrappers.create_and_export(

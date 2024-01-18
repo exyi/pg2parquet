@@ -69,6 +69,19 @@ def run_sql(*commands: str):
                 cur.execute(command)
             conn.commit()
 
+def run_pg2parquet(args: list[str]):
+    r = subprocess.run([ pg2parquet_binary, *args ], env={
+        "PGPASSWORD": pg2parquet_password,
+    }, capture_output=True)
+    if r.returncode != 0:
+        print(f"pg2parquet exited with code {r.returncode}. Stdout:")
+        print(r.stdout.decode("utf-8"))
+        print("Stderr:")
+        print(r.stderr.decode("utf-8"))
+        raise Exception(f"pg2parquet exited with code {r.returncode}")
+    return r
+
+
 def run_export(name, query = None, options = []) -> pyarrow.Table:
     outfile = os.path.join(output_directory, name + ".parquet")
     if query is not None:
@@ -85,15 +98,8 @@ def run_export(name, query = None, options = []) -> pyarrow.Table:
         "--output-file", outfile,
         *options
     ]
-    r = subprocess.run([ pg2parquet_binary, *args ], env={
-        "PGPASSWORD": pg2parquet_password,
-    }, capture_output=True)
-    if r.returncode != 0:
-        print(f"pg2parquet exited with code {r.returncode}. Stdout:")
-        print(r.stdout.decode("utf-8"))
-        print("Stderr:")
-        print(r.stderr.decode("utf-8"))
-        raise Exception(f"pg2parquet exited with code {r.returncode}")
+
+    run_pg2parquet(args)
 
     return outfile
 
