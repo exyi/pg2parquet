@@ -30,6 +30,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "pg2parquet")]
 #[command(bin_name = "pg2parquet")]
+#[command(version)]
 enum CliCommand {
     /// Dumps something from a parquet file
     #[command(arg_required_else_help = true, hide = true)]
