@@ -26,7 +26,7 @@ fn print_col_info<T: DataType<T = T2>, T2: Default + Clone + ParquetTypeFormat>(
 }
 
 #[cfg(not(debug_assertions))]
-pub fn print_parquet_info(path: &std::path::PathBuf) {
+pub fn print_parquet_info(_path: &std::path::PathBuf) {
 	println!("Disabled in release build")
 }
 

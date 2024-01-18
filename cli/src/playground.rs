@@ -7,7 +7,7 @@ use std::mem;
 use std::{fs, sync::Arc};
 
 #[cfg(not(debug_assertions))]
-pub fn create_something(file_path: &std::path::PathBuf) {
+pub fn create_something(_file_path: &std::path::PathBuf) {
 	println!("Disabled in release build")
 }
 
