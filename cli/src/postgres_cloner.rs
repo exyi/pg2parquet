@@ -113,14 +113,14 @@ fn read_password(user: &str) -> Result<String, String> {
 	Ok(password)
 }
 
-#[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64"))))]
+#[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64"))))]
 fn build_tls_connector() -> Result<postgres_native_tls::MakeTlsConnector, String> {
 	let connector = native_tls::TlsConnector::new().map_err(|e| format!("Creating TLS connector failed: {}", e.to_string()))?;
 	let pg_connector = postgres_native_tls::MakeTlsConnector::new(connector);
 	Ok(pg_connector)
 }
 
-#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64")))))]
+#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64")))))]
 fn build_tls_connector() -> Result<NoTls, String> {
 	Ok(NoTls)
 }
@@ -143,7 +143,7 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 		pg_config.password(&read_password(pg_config.get_user().unwrap())?.trim());
 	}
 
-	#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64", target_arch="riscv64")))))]
+	#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64")))))]
 	match &args.sslmode {
 		None | Some(crate::SslMode::Disable) => {},
 		Some(x) => return Err(format!("SSL/TLS is disabled in this build of pg2parquet, so ssl mode {:?} cannot be used. Only 'disable' option is allowed.", x)),
