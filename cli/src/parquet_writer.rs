@@ -29,6 +29,7 @@ pub struct ParquetRowWriter<W: Write + Send> {
 	last_timestep_time: std::time::Instant,
 	start_time: std::time::Instant,
 	last_print_time: std::time::Instant,
+	quiet: bool,
 	settings: WriterSettings,
 	current_group_bytes: usize,
 	current_group_rows: usize
@@ -39,6 +40,7 @@ impl <W: Write + Send> ParquetRowWriter<W> {
 		writer: SerializedFileWriter<W>,
 		schema: parquet::schema::types::TypePtr,
 		appender: DynColumnAppender<Arc<postgres::Row>>,
+		quiet: bool,
 		settings: WriterSettings
 	) -> parquet::errors::Result<Self> {
 		// let mut row_group_writer = writer.next_row_group()?;
@@ -53,6 +55,7 @@ impl <W: Write + Send> ParquetRowWriter<W> {
 			last_timestep_time: start_time,
 			last_print_time: start_time,
 			start_time,
+			quiet,
 			settings,
 			current_group_bytes: 0,
 			current_group_rows: 0
@@ -94,7 +97,7 @@ impl <W: Write + Send> ParquetRowWriter<W> {
 			self.flush_group()?;
 		}
 
-		if self.stats.rows % 256 == 0 {
+		if !self.quiet && self.stats.rows % 256 == 0 {
 			self.print_stats(false);
 		}
 

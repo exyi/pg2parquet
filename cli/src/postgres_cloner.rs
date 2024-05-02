@@ -165,13 +165,15 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 	Ok(client)
 }
 
-pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
+pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, quiet: bool, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
 
 	let mut client = pg_connect(pg_args)?;
 	let statement = client.prepare(query).map_err(|db_err| { db_err.to_string() })?;
 
 	let (row_appender, schema) = map_schema_root(statement.columns(), schema_settings)?;
-	eprintln!("Schema: {}", format_schema(&schema, 0));
+	if !quiet {
+		eprintln!("Schema: {}", format_schema(&schema, 0));
+	}
 	let schema = Arc::new(schema);
 
 	let settings = WriterSettings { row_group_byte_limit: 500 * 1024 * 1024, row_group_row_limit: output_props.max_row_group_size() };
@@ -179,7 +181,7 @@ pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathB
 	let output_file_f = std::fs::File::create(output_file).unwrap();
 	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props)
 		.map_err(|e| format!("Failed to create parquet writer: {}", e))?;
-	let mut row_writer = ParquetRowWriter::new(pq_writer, schema.clone(), row_appender, settings)
+	let mut row_writer = ParquetRowWriter::new(pq_writer, schema.clone(), row_appender, quiet, settings)
 		.map_err(|e| format!("Failed to create row writer: {}", e))?;
 
 	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[]).unwrap();

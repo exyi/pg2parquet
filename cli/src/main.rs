@@ -59,6 +59,9 @@ struct ExportArgs {
     /// Compression level of the output file compressor. Only relevant for zstd, brotli and gzip. Default: 3
     #[arg(long, hide_short_help = true)]
     compression_level: Option<i32>,
+    /// Avoid printing unnecessary information (schema and progress). Only errors will be written to stderr
+    #[arg(long, hide_short_help = true)]
+    quiet: bool,
     #[command(flatten)]
     postgres: PostgresConnArgs,
     #[command(flatten)]
@@ -230,7 +233,7 @@ fn perform_export(args: ExportArgs) {
     let query = args.query.unwrap_or_else(|| {
         format!("SELECT * FROM {}", args.table.unwrap())
     });
-    let result = postgres_cloner::execute_copy(&args.postgres, &query, &args.output_file, props, &settings);
+    let result = postgres_cloner::execute_copy(&args.postgres, &query, &args.output_file, props, args.quiet, &settings);
     let _stats = handle_result(result);
 
     // eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);
@@ -245,7 +248,7 @@ fn main() {
     std::panic::set_hook(Box::new(move |x| {
         default_hook(x);
         eprintln!();
-        eprintln!("pg2parquet probably should not crash in this way, could you please report a bug at https://github.com/exyi/pg2parquet/issues/new (ideally with the backtrace and some info on what you did)?");
+        eprintln!("pg2parquet probably should not crash in this way, could you please report a bug at https://github.com/exyi/pg2parquet/issues/new? (ideally with the backtrace and some info on what you did)");
     }));
     let args = parse_args();
 

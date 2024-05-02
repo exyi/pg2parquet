@@ -108,6 +108,9 @@ Options:
       --compression-level <COMPRESSION_LEVEL>
           Compression level of the output file compressor. Only relevant for zstd, brotli and gzip. Default: 3
 
+      --quiet
+          Avoid printing unnecessary information (schema and progress). Only errors will be written to stderr
+
   -H, --host <HOST>
           Database server host
 
@@ -189,6 +192,4 @@ Options:
           How many decimal digits are allowed in numeric/DECIMAL column. By default 38, the largest value which fits in 128 bits. If <= 9, the column is stored as INT32; if <= 18, the column is stored as INT64; otherwise BYTE_ARRAY
           
           [default: 38]
-
-  -h, --help
-          Print help information (use `-h` for a summary)```
+```
