@@ -3,7 +3,7 @@
 use std::{sync::Arc, path::PathBuf, process};
 
 use clap::{Parser, ValueEnum, Command};
-use parquet::basic::{ZstdLevel, BrotliLevel, GzipLevel};
+use parquet::{basic::{ZstdLevel, BrotliLevel, GzipLevel, Compression}, file::properties::DEFAULT_WRITE_BATCH_SIZE};
 use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling, SchemaSettingsEnumHandling, SchemaSettingsIntervalHandling, SchemaSettingsNumericHandling};
 
 mod postgresutils;
@@ -162,11 +162,11 @@ fn handle_result<T, TErr: ToString>(r: Result<T, TErr>) -> T {
 
 fn get_compression(args: &ExportArgs) -> Result<parquet::basic::Compression, parquet::errors::ParquetError> {
     let lvl = args.compression_level;
-    let level_not_supported =
+    let level_not_supported = ||
         if lvl.is_some() {
             Err(parquet::errors::ParquetError::General(format!(
                 "Compression algorithm {:?} does not allow setting --compression-level option",
-                args.compression.as_ref().unwrap()
+                args.compression.as_ref().unwrap_or(&ParquetCompression::Zstd)
             )))
         } else {
             Ok(())
@@ -176,10 +176,10 @@ fn get_compression(args: &ExportArgs) -> Result<parquet::basic::Compression, par
         Some(ParquetCompression::Brotli) => parquet::basic::Compression::BROTLI(BrotliLevel::try_new(lvl.unwrap_or(3) as u32)?),
         Some(ParquetCompression::Gzip) => parquet::basic::Compression::GZIP(GzipLevel::try_new(lvl.unwrap_or(3) as u32)?),
         Some(ParquetCompression::Zstd) => parquet::basic::Compression::ZSTD(ZstdLevel::try_new(lvl.unwrap_or(3))?),
-        Some(ParquetCompression::Lzo) => { level_not_supported?; parquet::basic::Compression::LZO }
-        Some(ParquetCompression::Lz4) => { level_not_supported?; parquet::basic::Compression::LZ4 }
-        Some(ParquetCompression::Snappy) => { level_not_supported?; parquet::basic::Compression::SNAPPY }
-        Some(ParquetCompression::None) => { level_not_supported?; parquet::basic::Compression::UNCOMPRESSED }
+        Some(ParquetCompression::Lzo) => { level_not_supported()?; parquet::basic::Compression::LZO }
+        Some(ParquetCompression::Lz4) => { level_not_supported()?; parquet::basic::Compression::LZ4 }
+        Some(ParquetCompression::Snappy) => { level_not_supported()?; parquet::basic::Compression::SNAPPY }
+        Some(ParquetCompression::None) => { level_not_supported()?; parquet::basic::Compression::UNCOMPRESSED }
     };
     Ok(compression)
 }
@@ -199,9 +199,21 @@ fn perform_export(args: ExportArgs) {
         process::exit(1);
     });
 
+    let batch_size = match compression {
+        // use smaller page size if shitty compression is chosen
+        Compression::UNCOMPRESSED | Compression::SNAPPY | Compression::LZO | Compression::LZ4 =>
+            DEFAULT_WRITE_BATCH_SIZE,
+        Compression::ZSTD(lvl) if lvl.compression_level() <= 2 =>
+            DEFAULT_WRITE_BATCH_SIZE,
+        // otherwise prefer larger page size to improve the compression ratio slightly
+        // the parquet library doesn't parallelize compression anyway
+        _ => 1024 * 128,
+    };
+
     let props =
         parquet::file::properties::WriterProperties::builder()
             .set_compression(compression)
+            .set_write_batch_size(batch_size)
             .set_created_by(format!("pg2parquet version {}, using {}", env!("CARGO_PKG_VERSION"), parquet::file::properties::DEFAULT_CREATED_BY))
         .build();
     let props = Arc::new(props);
@@ -219,9 +231,9 @@ fn perform_export(args: ExportArgs) {
         format!("SELECT * FROM {}", args.table.unwrap())
     });
     let result = postgres_cloner::execute_copy(&args.postgres, &query, &args.output_file, props, &settings);
-    let stats = handle_result(result);
+    let _stats = handle_result(result);
 
-    eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);
+    // eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);
 }
 
 fn parse_args() -> CliCommand {
