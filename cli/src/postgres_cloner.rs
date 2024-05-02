@@ -106,11 +106,8 @@ pub fn default_settings() -> SchemaSettings {
 }
 
 fn read_password(user: &str) -> Result<String, String> {
-	print!("Password for user {}: ", user);
-	io::stdout().flush().unwrap();
-	let mut password = String::new();
-	io::stdin().read_line(&mut password).map_err(|x| x.to_string())?;
-	Ok(password)
+	let password = rpassword::prompt_password(&format!("Password for user {}: ", user));
+	password.map_err(|e| format!("Failed to read password from TTY: {}", e))
 }
 
 #[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64"))))]

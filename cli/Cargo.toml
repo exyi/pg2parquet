@@ -24,6 +24,7 @@ bigdecimal = "0.4.1"
 bytes = "1.4.0"
 postgres-protocol = "0.6.5"
 byteorder = "1.4.3"
+rpassword = "7.3.1"
 
 [target.'cfg(not(any(target_family = "windows", target_arch = "riscv64")))'.dependencies]
 jemallocator = "0.5.4"
