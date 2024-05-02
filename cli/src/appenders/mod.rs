@@ -13,4 +13,4 @@ mod array;
 mod pg_column;
 mod merged;
 mod helpers;
-mod byte_array;
+pub mod byte_array;

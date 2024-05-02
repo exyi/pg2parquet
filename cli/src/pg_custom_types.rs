@@ -65,6 +65,22 @@ impl<'b, 'a: 'b> FromSql<'a> for PgAnyRef<'b> {
 	fn accepts(_ty: &postgres::types::Type) -> bool { true }
 }
 
+// #[derive(Debug, Clone)]
+// pub struct PgTypedRef<'a, const TYPE_OID: u32> {
+// 	pub value: &'a [u8]
+// }
+// impl<'b, 'a: 'b, const TYPE_OID: u32> FromSql<'a> for PgTypedRef<'b, TYPE_OID> {
+// 	fn from_sql(ty: &postgres::types::Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+// 		postgres::types::Type::TEXT.oid()
+// 		debug_assert_eq!(TYPE_OID, ty.oid());
+// 		Ok(PgTypedRef {
+// 			value: raw
+// 		})
+// 	}
+
+// 	fn accepts(_ty: &postgres::types::Type) -> bool { true }
+// }
+
 #[derive(Debug, Clone)]
 pub struct PgRawRange {
 	pub element_type: postgres::types::Type,

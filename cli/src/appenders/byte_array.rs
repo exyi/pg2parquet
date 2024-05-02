@@ -1,6 +1,7 @@
 use std::{marker::PhantomData, sync::Arc, borrow::Cow};
 
-use bytes::Bytes;
+use byteorder::{ReadBytesExt, ByteOrder, BigEndian};
+use bytes::{Bytes, BufMut};
 use parquet::{data_type::{DataType, ByteArray, FixedLenByteArray, ByteArrayType}, file::writer::SerializedColumnWriter, errors::ParquetError};
 
 use crate::{level_index::{LevelIndexState, LevelIndexList}, myfrom::MyFrom, pg_custom_types::{PgAnyRef, PgAbstractRow}};
@@ -8,7 +9,7 @@ use crate::{level_index::{LevelIndexState, LevelIndexList}, myfrom::MyFrom, pg_c
 use super::{real_memory_size::RealMemorySize, ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter};
 
 
-pub struct ByteArrayColumnAppender<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> {
+pub struct ByteArrayColumnAppender<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> {
 	max_dl: i16,
 	max_rl: i16,
 	byte_buffer: Vec<u8>,
@@ -20,7 +21,7 @@ pub struct ByteArrayColumnAppender<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -
 	_dummy: PhantomData<TPg>,
 }
 
-impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ByteArrayColumnAppender<TPg, FCopyTo> {
+impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppender<TPg, FCopyTo> {
 	pub fn new(max_dl: i16, max_rl: i16, f_copy: FCopyTo) -> Self {
 		if max_dl < 0 || max_rl < 0 {
 			panic!("Cannot create {} with max_dl={}, max_rl={}", std::any::type_name::<Self>(), max_dl, max_rl);
@@ -37,12 +38,39 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ByteArrayColumnAppend
 		}
 	}
 
-	pub fn append(&mut self, value: &TPg) -> usize {
+	pub fn append(&mut self, repetition_index: &LevelIndexList, value: &TPg) -> usize {
 		let index = self.byte_buffer.len();
-		let len = (self.conversion)(value, &mut self.byte_buffer);
-		debug_assert_eq!(index + len, self.byte_buffer.len());
-		self.offsets.push(index);
-		len
+		if let Some(len) = (self.conversion)(value, &mut self.byte_buffer) {
+			debug_assert_eq!(index + len, self.byte_buffer.len());
+			self.offsets.push(index);
+
+			if self.max_dl > 0 {
+				self.dls.push(self.max_dl);
+			}
+			if self.max_rl > 0 {
+				let rl = self.repetition_index.copy_and_diff(repetition_index);
+	
+				// println!("Appending {:?} with RL: {}, {:?} {:?}", self.column.last().unwrap(),  rl, self_ri, repetition_index);
+				self.rls.push(rl);
+			}
+
+			len + 2 * (self.max_dl > 0) as usize + 2 * (self.max_rl > 0) as usize
+		} else {
+			self.write_null(repetition_index, self.max_dl - 1)
+		}
+	}
+
+	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> usize {
+		debug_assert!(level < self.max_dl);
+
+		self.dls.push(level);
+		if self.max_rl > 0 {
+			let rl = self.repetition_index.copy_and_diff(repetition_index);
+			self.rls.push(rl);
+			4
+		} else {
+			2
+		}
 	}
 
 	fn write_column(&mut self, writer: &mut SerializedColumnWriter) -> Result<(), ParquetError> {
@@ -52,7 +80,10 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ByteArrayColumnAppend
 		let writer_t = writer.typed::<ByteArrayType>();
 
 		if self.offsets.len() == 0 {
+			assert_eq!(0, self.byte_buffer.len());
 			writer_t.write_batch(&[], dls, rls)?;
+			self.dls.clear();
+			self.rls.clear();
 			return Ok(());
 		}
 
@@ -61,9 +92,12 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ByteArrayColumnAppend
 		// 	println!("           RLS: {:?}", self.rls);
 		// 	println!("           DLS: {:?}", self.dls);
 		// }
-		let mut byte_array = Vec::new();
-		std::mem::swap(&mut self.byte_buffer, &mut byte_array);
-		let byte_array = Bytes::from(byte_array);
+		// let mut byte_array = Vec::new();
+		// std::mem::swap(&mut self.byte_buffer, &mut byte_array);
+		let byte_array = unsafe {
+			// Bytes is leaking memory for some reason
+			Bytes::from_static(std::mem::transmute::<&[u8], &'static [u8]>(&self.byte_buffer))
+		};
 
 		let mut column: Vec<ByteArray> = vec![ByteArray::new(); self.offsets.len()];
 		for ((&offset, &next), out) in self.offsets.iter().zip(self.offsets.iter().skip(1)).zip(column.iter_mut()) {
@@ -74,9 +108,11 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ByteArrayColumnAppend
 		column[self.offsets.len()-1] = ByteArray::from(byte_array.slice(*self.offsets.last().unwrap()..));
 
 		let _num_written = writer_t.write_batch(&column, dls, rls)?;
+		std::mem::drop(column);
 
 		self.offsets.clear();
-		self.byte_buffer.reserve(byte_array.len() / 4);
+		self.byte_buffer.clear();
+		// self.byte_buffer.reserve(byte_array.len() / 4);
 		assert_eq!(0, self.byte_buffer.len());
 		self.dls.clear();
 		self.rls.clear();
@@ -85,7 +121,7 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ByteArrayColumnAppend
 	}
 }
 
-impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FCopyTo> {
+impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FCopyTo> {
 
 	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
 		let mut error = None;
@@ -110,35 +146,18 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ColumnAppenderBase fo
 	}
 
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-		debug_assert!(level < self.max_dl);
-
-		self.dls.push(level);
-		if self.max_rl > 0 {
-			let rl = self.repetition_index.copy_and_diff(repetition_index);
-			self.rls.push(rl);
-			Ok(4)
-		} else {
-			Ok(2)
-		}
+		Ok(self.write_null(repetition_index, level))
 	}
 
 	fn max_dl(&self) -> i16 { self.max_dl }
 	fn max_rl(&self) -> i16 { self.max_rl }
 }
 
-impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FCopyTo> {
+impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FCopyTo> {
 	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
-		let byte_size = self.append(value.as_ref());
-		if self.max_dl > 0 {
-			self.dls.push(self.max_dl);
-		}
-		if self.max_rl > 0 {
-			let rl = self.repetition_index.copy_and_diff(repetition_index);
-
-			// println!("Appending {:?} with RL: {}, {:?} {:?}", self.column.last().unwrap(),  rl, self_ri, repetition_index);
-			self.rls.push(rl);
-		}
-		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
+		let byte_size = self.append(repetition_index, value.as_ref());
+		
+		Ok(byte_size)
 	}
 }
 
@@ -148,12 +167,36 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> usize> ColumnAppender<TPg> f
 
 // impl Col
 
-pub fn create_string_appender<TRow: PgAbstractRow>(max_dl: i16, max_rl: i16, column_index: usize) -> impl ColumnAppender<Arc<TRow>> {
-	let a = ByteArrayColumnAppender::new(max_dl, max_rl, move |row: &Arc<TRow>, buffer: &mut Vec<u8>| {
-		let value: PgAnyRef = row.ab_get(column_index);
-		debug_assert!(value.ty == postgres::types::Type::TEXT);
-		buffer.extend_from_slice(value.value);
-		value.value.len()
+/// Directly appends the bytes of the Postgres wire representation
+/// Works for TEXT (and similar), BYTES, JSON (not JSONB!!)
+pub fn create_pg_raw_appender<TRow: PgAbstractRow + Clone>(max_dl: i16, max_rl: i16, column_index: usize) -> impl ColumnAppender<TRow> {
+	let a = ByteArrayColumnAppender::new(max_dl, max_rl, move |row: &TRow, buffer: &mut Vec<u8>| {
+		if let Some(value) = row.ab_get::<Option<PgAnyRef>>(column_index) {
+			buffer.extend_from_slice(value.value);
+			Some(value.value.len())
+		} else {
+			None
+		}
 	});
 	a
 }
+
+pub fn create_jsonb_appender<TRow: PgAbstractRow + Clone, const TYPE_OID: u32>(max_dl: i16, max_rl: i16, column_index: usize) -> impl ColumnAppender<TRow> {
+	let a = ByteArrayColumnAppender::new(max_dl, max_rl, move |row: &TRow, buffer: &mut Vec<u8>| {
+		if let Some(value) = row.ab_get::<Option<PgAnyRef>>(column_index) {
+
+			debug_assert_eq!(value.ty, postgres::types::Type::JSONB);
+			let mut data = value.value;
+			let version = data.read_i32::<BigEndian>().unwrap();
+			assert_eq!(version, 1);
+			buffer.extend_from_slice(data);
+			Some(value.value.len())
+		} else {
+			None
+		}
+	});
+	a
+}
+// pub fn create_string_appender<TRow: PgAbstractRow>(max_dl: i16, max_rl: i16, column_index: usize) -> impl ColumnAppender<Arc<TRow>> {
+// 	create_pg_raw_appender::<TRow, TYPE_OID>(max_dl, max_rl, column_index)
+// }
