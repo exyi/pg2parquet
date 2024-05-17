@@ -1,0 +1,45 @@
+name: test
+description: Runs Python integration tests for pg2parquet
+
+inputs:
+  binary:
+    description: The pg2parquet compiled binary
+  pg_version:
+    default: '16'
+    description: PostgreSQL version
+    required: true
+
+runs:
+  using: composite
+  steps:
+  - run: cd .github/pg_container && docker build --build-arg PG_VERSION=${{ inputs.pg_version }} -t pg2parquet-postgres .
+    shell: bash
+  - run: docker run -d --name pg2parquet-postgres1 -p 5432:5432 -e POSTGRES_PASSWORD=postgres pg2parquet-postgres
+    shell: bash
+  - run: timeout 120s bash -c 'until docker exec pg2parquet-postgres1 psql -U postgres -c "select 1;"; do echo "Waiting for PG startup..."; sleep 0.3; done'
+    shell: bash
+  - run: docker exec pg2parquet-postgres1 psql -U postgres -c "CREATE DATABASE pg2parquet_test;"
+    shell: bash
+
+  - uses: actions/setup-python@v4
+    with:
+      python-version: 3.12
+
+  - uses: abatilo/actions-poetry@v2
+    with:
+      poetry-version: 1.8.2
+
+  - run: poetry install --no-root
+    working-directory: py-tests
+    shell: bash
+
+  - run: poetry -C py-tests run python -m pytest
+    shell: bash
+    env:
+      PG2PARQUET_TEST_BIN: ${{ inputs.binary }}
+      PG2PARQUET_TEST_DB_HOST: 127.0.0.1
+      PG2PARQUET_TEST_DB_PORT: 5432
+      PG2PARQUET_TEST_DB_NAME: testdb
+      PG2PARQUET_TEST_DB_USER: postgres
+      PG2PARQUET_TEST_DB_PASSWORD: postgres
+

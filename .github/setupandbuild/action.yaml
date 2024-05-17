@@ -1,0 +1,38 @@
+name: setup_and_build
+description: Setups repository, Rust and build pg2parquet
+
+inputs:
+  rust_target:
+    description: Target triple
+    required: true
+  rust_profile:
+    description: Cargo Profile to use
+    default: ci-build
+    required: true
+runs:
+  using: composite
+  steps:
+  - uses: actions-rs/toolchain@master
+    with:
+      target: ${{ inputs.rust_target }}
+      toolchain: stable
+      override: true
+
+  - name: Build
+    uses: actions-rs/cargo@v1
+    with:
+      use-cross: ${{ runner.os != 'Windows' && (inputs.rust_target == 'x86_64-unknown-linux-musl' || inputs.rust_target == 'x86_64-pc-windows-gnu' || inputs.rust_target == 'aarch64-unknown-linux-gnu' || inputs.rust_target == 'riscv64gc-unknown-linux-gnu') }}
+      command: build
+      args: --locked --profile=${{ inputs.rust_profile }} --manifest-path=cli/Cargo.toml --target=${{ inputs.rust_target }}
+  - name: Copy binary
+    if: inputs.rust_target != 'x86_64-pc-windows-gnu'
+    shell: bash
+    run: |
+      mkdir output_dir
+      cp cli/target/${{ inputs.rust_target }}/${{ inputs.rust_profile == 'dev' && 'debug' || inputs.rust_profile }}/pg2parquet output_dir/
+  - name: Copy binary
+    if: inputs.rust_target == 'x86_64-pc-windows-gnu'
+    shell: bash
+    run: |
+      mkdir output_dir
+      cp cli/target/${{ inputs.rust_target }}/${{ inputs.rust_profile == 'dev' && 'debug' || inputs.rust_profile }}/pg2parquet.exe output_dir/

@@ -1,0 +1,34 @@
+name: Build release binaries
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-rust:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust_target: [x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl, x86_64-pc-windows-gnu, aarch64-unknown-linux-gnu, riscv64gc-unknown-linux-gnu]
+        os: [ubuntu-latest]
+        include:
+          - rust_target: x86_64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: find .github
+        shell: bash
+      - uses: ./.github/setupandbuild
+        with:
+          rust_target: ${{ matrix.rust_target }}
+      - name: Strip binary
+        if: matrix.rust_target == 'x86_64-unknown-linux-musl' 
+        run: |
+          strip output_dir/pg2parquet
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-${{ matrix.rust_target }}
+          path: output_dir/pg2parquet${{ matrix.rust_target == 'x86_64-pc-windows-gnu' && '.exe' || '' }}
