@@ -181,7 +181,7 @@ pub fn create_pg_raw_appender<TRow: PgAbstractRow + Clone>(max_dl: i16, max_rl: 
 	a
 }
 
-pub fn create_jsonb_appender<TRow: PgAbstractRow + Clone, const TYPE_OID: u32>(max_dl: i16, max_rl: i16, column_index: usize) -> impl ColumnAppender<TRow> {
+pub fn create_jsonb_appender<TRow: PgAbstractRow + Clone>(max_dl: i16, max_rl: i16, column_index: usize) -> impl ColumnAppender<TRow> {
 	let a = ByteArrayColumnAppender::new(max_dl, max_rl, move |row: &TRow, buffer: &mut Vec<u8>| {
 		if let Some(value) = row.ab_get::<Option<PgAnyRef>>(column_index) {
 
@@ -198,5 +198,5 @@ pub fn create_jsonb_appender<TRow: PgAbstractRow + Clone, const TYPE_OID: u32>(m
 	a
 }
 // pub fn create_string_appender<TRow: PgAbstractRow>(max_dl: i16, max_rl: i16, column_index: usize) -> impl ColumnAppender<Arc<TRow>> {
-// 	create_pg_raw_appender::<TRow, TYPE_OID>(max_dl, max_rl, column_index)
+// 	create_pg_raw_appender::<TRow>(max_dl, max_rl, column_index)
 // }

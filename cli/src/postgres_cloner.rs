@@ -438,6 +438,8 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, None, None),
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
 			resolve_primitive::<String, ByteArrayType, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8)),
+			// (Box::new(crate::appenders::byte_array::create_pg_raw_appender(c.definition_level + 1, c.repetition_level, c.col_i)),
+			// 	ParquetType::primitive_type_builder(name, basic::Type::BYTE_ARRAY).with_logical_type(Some(LogicalType::String)).with_converted_type(ConvertedType::UTF8).build().unwrap()),
 		"jsonb" | "json" =>
 			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, Some(match s.json_handling {
 				SchemaSettingsJsonHandling::Text => LogicalType::String,
