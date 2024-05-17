@@ -234,7 +234,7 @@ class TestBasic(unittest.TestCase):
 
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
-            (1, datetime.date(2000, 1, 1), datetime.time(12, 34, 56), datetime.datetime(2000, 1, 1, 12, 34, 56), datetime.datetime(2000, 1, 1, 12, 34, 56)),
+            (1, datetime.date(2000, 1, 1), datetime.time(12, 34, 56), datetime.datetime(2000, 1, 1, 12, 34, 56), datetime.datetime(2000, 1, 1, 12, 34, 56, tzinfo=datetime.timezone.utc).astimezone()),
             (2, None, None, None, None)
         ])
 
