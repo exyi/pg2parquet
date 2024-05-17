@@ -55,9 +55,11 @@ def ensure_new_db(dbname):
 
     conn = pg_connect(dbname)
     try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS citext")
+
+        for ext in ["citext", "postgis", "vector"]:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("CREATE EXTENSION IF NOT EXISTS {}").format(sql.Identifier(ext)))
     finally:
         conn.close()
 
