@@ -22,14 +22,18 @@ os.makedirs(output_directory, exist_ok=True)
 if output_directory.startswith("/tmp/"):
     atexit.register(lambda: subprocess.run(["rm", "-rf", output_directory]))
 
+if pg2parquet_binary is not None and not os.path.exists(pg2parquet_binary):
+    print(f"pg2parquet binary {pg2parquet_binary} does not exist")
+    sys.exit(1)
+
 if pg2parquet_binary is None or pg2parquet_user is None or pg2parquet_password is None:
     print("Please set the following environment variables:")
-    print(f"   {env_prefix}BIN - path to the pg2parquet binary to test")
-    print(f"   {env_prefix}DB_HOST - hostname of the database to connect to")
-    print(f"   {env_prefix}DB_PORT - port of the database to connect to")
-    print(f"   {env_prefix}DB_NAME - which database to use for testing. If the db does not exists, attempts to create it")
-    print(f"   {env_prefix}DB_USER - username to connect to the database with")
-    print(f"   {env_prefix}DB_PASSWORD - password to connect to the database with")
+    print(f"   {env_prefix}BIN{' ✅' if pg2parquet_binary else ' ❌'} - path to the pg2parquet binary to test")
+    print(f"   {env_prefix}DB_HOST{'' if pg2parquet_host == 'localhost' else ' ✅' if pg2parquet_host else ' ❌'} - hostname of the database to connect to (default: localhost)")
+    print(f"   {env_prefix}DB_PORT{'' if pg2parquet_port == '5432' else ' ✅' if pg2parquet_port else ' ❌'} - port of the database to connect to (default: 5432)")
+    print(f"   {env_prefix}DB_NAME{'' if pg2parquet_dbname == 'pg2parquet_test' else ' ✅' if pg2parquet_dbname else ' ❌'} - which database to use for testing. If the db does not exists, attempts to create it (default: pg2parquet_test)")
+    print(f"   {env_prefix}DB_USER{' ✅' if pg2parquet_user else ' ❌'} - username to connect to the database with")
+    print(f"   {env_prefix}DB_PASSWORD{' ✅' if pg2parquet_password else ' ❌'} - password to connect to the database with")
     sys.exit(1)
 
 def pg_connect(dbname = pg2parquet_dbname):
