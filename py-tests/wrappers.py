@@ -1,6 +1,7 @@
 import sys, os, re, math, subprocess
-from typing import List, Tuple
-import psycopg2, psycopg2.extensions
+from typing import List, Tuple, Union
+import psycopg
+from psycopg import sql
 import pyarrow
 import pyarrow.parquet
 import polars
@@ -12,7 +13,7 @@ env_prefix = "PG2PARQUET_TEST_"
 pg2parquet_binary = os.getenv(env_prefix + "BIN", None)
 pg2parquet_host = os.getenv(env_prefix + "DB_HOST", "localhost")
 pg2parquet_port = os.getenv(env_prefix + "DB_PORT", "5432")
-pg2parquet_dbname = os.getenv(env_prefix + "DB_NAME", "5432")
+pg2parquet_dbname = os.getenv(env_prefix + "DB_NAME", "pg2parquet_test")
 pg2parquet_user = os.getenv(env_prefix + "DB_USER", os.getenv("PGUSER", None))
 pg2parquet_password = os.getenv(env_prefix + "DB_PASSWORD", os.getenv("PGPASSWORD", None))
 output_directory = os.getenv(env_prefix + "OUTDIR", f"/tmp/pg2parquet-test-{os.getpid()}")
@@ -32,7 +33,7 @@ if pg2parquet_binary is None or pg2parquet_user is None or pg2parquet_password i
     sys.exit(1)
 
 def pg_connect(dbname = pg2parquet_dbname):
-    return psycopg2.connect(
+    return psycopg.connect(
         host=pg2parquet_host,
         port=pg2parquet_port,
         user=pg2parquet_user,
@@ -45,10 +46,10 @@ def ensure_new_db(dbname):
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute(f"SELECT 1 FROM pg_database WHERE datname='{dbname}'")
+            cur.execute(sql.SQL("SELECT 1 FROM pg_database WHERE datname={}").format(sql.Literal(dbname)))
             if cur.fetchone() is not None:
-                cur.execute(f"DROP DATABASE {dbname}")
-            cur.execute(f"CREATE DATABASE {dbname}")
+                cur.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(dbname)))
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
     finally:
         conn.close()
 
@@ -62,11 +63,14 @@ def ensure_new_db(dbname):
 
 ensure_new_db(pg2parquet_dbname)
 
-def run_sql(*commands: str):
+def run_sql(*commands: Union[str, sql.SQL, sql.Composed]):
     with pg_connect() as conn:
         with conn.cursor() as cur:
             for command in commands:
-                cur.execute(command)
+                if isinstance(command, str):
+                    cur.execute(str_to_sql(command))
+                else:
+                    cur.execute(command)
             conn.commit()
 
 def run_pg2parquet(args: list[str]):
@@ -102,6 +106,9 @@ def run_export(name, query = None, options = []) -> pyarrow.Table:
     run_pg2parquet(args)
 
     return outfile
+
+def str_to_sql(s: str) -> sql.SQL:
+    return sql.SQL(s) # type: ignore
 
 def create_and_export(name, sort_column, schema, inserts, options=[]):
     run_sql(
