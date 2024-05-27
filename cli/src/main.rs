@@ -96,12 +96,15 @@ pub struct PostgresConnArgs {
     /// Controls whether to use SSL/TLS to connect to the server.
     #[arg(long="sslmode", alias="tlsmode", alias="ssl-mode", alias="tls-mode")]
     sslmode: Option<SslMode>,
+    /// File with a TLS root certificate in PEM or DER (.crt) format. When specified, the default CA certificates are considered untrusted. The option can be specified multiple times. Using this options implies --sslmode=require.
+    #[arg(long="ssl-root-cert", alias="tls-root-cert")]
+    ssl_root_cert: Option<Vec<PathBuf>>
 }
 
 impl std::fmt::Debug for PostgresConnArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let password = self.password.as_ref().map(|_| "********");
-        f.debug_struct("PostgresConnArgs").field("host", &self.host).field("user", &self.user).field("dbname", &self.dbname).field("port", &self.port).field("password", &password).field("sslmode", &self.sslmode).finish()
+        f.debug_struct("PostgresConnArgs").field("host", &self.host).field("user", &self.user).field("dbname", &self.dbname).field("port", &self.port).field("password", &password).field("sslmode", &self.sslmode).field("ssl_root_cert", &self.ssl_root_cert).finish()
     }
 }
 
