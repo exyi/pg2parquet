@@ -99,7 +99,7 @@ pub fn default_settings() -> SchemaSettings {
 		json_handling: SchemaSettingsJsonHandling::Text, // DuckDB doesn't load JSON converted type, so better to use string I guess
 		enum_handling: SchemaSettingsEnumHandling::Text,
 		interval_handling: SchemaSettingsIntervalHandling::Interval,
-		numeric_handling: SchemaSettingsNumericHandling::Decimal,
+		numeric_handling: SchemaSettingsNumericHandling::Double,
 		decimal_scale: 18,
 		decimal_precision: 38,
 	}
