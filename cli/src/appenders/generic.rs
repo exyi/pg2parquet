@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, sync::Arc, borrow::Cow};
 
-use parquet::{data_type::DataType, file::writer::SerializedColumnWriter, errors::ParquetError};
+use parquet::{column::writer::ColumnWriter, data_type::DataType, errors::ParquetError, file::writer::SerializedColumnWriter, schema::types::ColumnDescriptor};
 
 use crate::{level_index::{LevelIndexState, LevelIndexList}, myfrom::MyFrom};
 
@@ -75,8 +75,10 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TP
 
 	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
 		let mut error = None;
+		let mut col_descriptor: Option<(Arc<ColumnDescriptor>, u64, u64)> = None;
 		let c = next_col.next_column(&mut |mut column| {
 			let result = self.write_column(&mut column);
+			col_descriptor = Some(get_column_descriptor(&mut column));
 			let error1 = result.err();
 			let result2 = column.close();
 
@@ -84,8 +86,13 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TP
 			
 		}).map_err(|e| format!("Could not create column[{}]: {}", column_i, e))?;
 
+		debug_assert!(col_descriptor.is_some());
+		debug_assert_eq!(col_descriptor.as_ref().unwrap().0.max_def_level(), self.max_dl);
+		debug_assert_eq!(col_descriptor.as_ref().unwrap().0.max_rep_level(), self.max_rl);
+
 		if error.is_some() {
-			return Err(format!("Couldn't write data of column[{}]: {}", column_i, error.unwrap()));
+			let col_name = col_descriptor.map(|(desc, _, _)| desc.path().string()).unwrap_or_else(|| format!("column[{}]", column_i));
+			return Err(format!("Couldn't write data of {}: {}", col_name, error.unwrap()));
 		}
 
 		if !c {
@@ -114,6 +121,19 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TP
 
 	fn max_dl(&self) -> i16 { self.max_dl }
 	fn max_rl(&self) -> i16 { self.max_rl }
+}
+
+fn get_column_descriptor(column: &mut SerializedColumnWriter) -> (Arc<ColumnDescriptor>, u64, u64) {
+	match column.untyped() {
+		ColumnWriter::BoolColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
+		ColumnWriter::Int32ColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
+		ColumnWriter::Int64ColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
+		ColumnWriter::Int96ColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
+		ColumnWriter::FloatColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
+		ColumnWriter::DoubleColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
+		ColumnWriter::ByteArrayColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
+		ColumnWriter::FixedLenByteArrayColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
+	}
 }
 
 impl<TPg: Clone, TPq, FConversion> ColumnAppender<TPg> for GenericColumnAppender<TPg, TPq, FConversion>
