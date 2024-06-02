@@ -92,7 +92,7 @@ def run_pg2parquet(args: list[str]):
     return r
 
 
-def run_export(name, query = None, options = []) -> pyarrow.Table:
+def run_export(name, query = None, options = []) -> str:
     outfile = os.path.join(output_directory, name + ".parquet")
     if query is not None:
         query_opt = ["--query", query]
@@ -113,6 +113,9 @@ def run_export(name, query = None, options = []) -> pyarrow.Table:
 
     return outfile
 
+def run_export_table(name, table, sort_column, options = []) -> str:
+    return run_export(name, f"SELECT * FROM {table} ORDER BY {sort_column} NULLS LAST", options=options)
+
 def str_to_sql(s: str) -> sql.SQL:
     return sql.SQL(s) # type: ignore
 
@@ -122,4 +125,4 @@ def create_and_export(name, sort_column, schema, inserts, options=[]):
         f"CREATE TABLE {name} ({schema})",
         f"INSERT INTO {name} VALUES {inserts}"
     )
-    return run_export(name, f"SELECT * FROM {name} ORDER BY {sort_column} NULLS LAST", options=options)
+    return run_export_table(name, name, sort_column, options=options)

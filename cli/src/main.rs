@@ -4,7 +4,7 @@ use std::{sync::Arc, path::PathBuf, process};
 
 use clap::{Parser, ValueEnum, Command};
 use parquet::{basic::{ZstdLevel, BrotliLevel, GzipLevel, Compression}, file::properties::DEFAULT_WRITE_BATCH_SIZE};
-use postgres_cloner::{SchemaSettingsMacaddrHandling, SchemaSettingsJsonHandling, SchemaSettingsEnumHandling, SchemaSettingsIntervalHandling, SchemaSettingsNumericHandling};
+use postgres_cloner::{SchemaSettingsArrayHandling, SchemaSettingsEnumHandling, SchemaSettingsIntervalHandling, SchemaSettingsJsonHandling, SchemaSettingsMacaddrHandling, SchemaSettingsNumericHandling};
 
 mod postgresutils;
 mod myfrom;
@@ -130,7 +130,10 @@ pub struct SchemaSettingsArgs {
 	decimal_scale: i32,
     /// How many decimal digits are allowed in numeric/DECIMAL column. By default 38, the largest value which fits in 128 bits. If <= 9, the column is stored as INT32; if <= 18, the column is stored as INT64; otherwise BYTE_ARRAY.
     #[arg(long, hide_short_help = true, default_value_t = 38)]
-	decimal_precision: u32,
+    decimal_precision: u32,
+    /// Parquet does not support multi-dimensional arrays and arrays with different starting index. pg2parquet flattens the arrays, and this options allows including the stripped information in additional columns.
+    #[arg(long, hide_short_help = true, default_value = "plain")]
+    array_handling: SchemaSettingsArrayHandling,
 }
 
 
@@ -232,6 +235,7 @@ fn perform_export(args: ExportArgs) {
         numeric_handling: args.schema_settings.numeric_handling,
         decimal_scale: args.schema_settings.decimal_scale,
         decimal_precision: args.schema_settings.decimal_precision,
+        array_handling: args.schema_settings.array_handling,
     };
     let query = args.query.unwrap_or_else(|| {
         format!("SELECT * FROM {}", args.table.unwrap())

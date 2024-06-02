@@ -22,7 +22,7 @@ impl<TPg: Clone, TInner> ArrayColumnAppender<TPg, TInner>
 			panic!("Cannot create {}, repetition levels {} must be one less than inner repetition levels {}", std::any::type_name::<Self>(), rl, inner.max_rl());
 		}
 		if inner.max_dl() != dl + 1 + allow_element_null as i16 {
-			panic!("Cannot create {}, definition levels {} must be {} less than inner definition levels {}", std::any::type_name::<Self>(), dl, if allow_element_null { "one" } else { "two" }, inner.max_dl());
+			panic!("Cannot create {}, definition levels {} must be {} less than inner definition levels {}", std::any::type_name::<Self>(), dl, 1 + allow_element_null as i16, inner.max_dl());
 		}
 		if dl < allow_null as i16 {
 			panic!("Cannot create {}, definition levels {} must be positive", std::any::type_name::<Self>(), dl);
@@ -94,6 +94,7 @@ impl<'a, TPg: Clone, TInner, TArray: Clone> ColumnAppender<TArray> for ArrayColu
 			Cow::Owned(Some(value)) => self.copy_value(repetition_index, Cow::<TArray>::Owned(value)),
 			Cow::Borrowed(Some(value)) => self.copy_value(repetition_index, Cow::Borrowed(value)),
 			Cow::Owned(None) | Cow::Borrowed(None) => {
+				// if !self.allow_null, this writes an empty array
 				let nested_ri = repetition_index.new_child();
 				self.inner.write_null(&nested_ri, self.dl - self.allow_null as i16)
 			},

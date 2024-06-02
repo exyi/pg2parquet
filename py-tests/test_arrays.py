@@ -88,3 +88,43 @@ class TestBasic(unittest.TestCase):
         # self.assertEqual(pl_df["simple_range"].to_list(), [ r[1] for r in duckdb_table ])
         # self.assertEqual(pl_df["rint_"].to_list(), [ r[2] for r in duckdb_table ])
 
+
+    def test_multidim(self):
+        self.maxDiff = None
+        plain_file = wrappers.create_and_export(
+            "arrays_multidim", "id",
+            "id int, a int[], b text[]",
+            """
+                (1, ARRAY[[1,2],[3,4],[NULL,5]], ARRAY[[NULL,'b'],['c',NULL]]),
+                (2, NULL, NULL),
+                (3, ARRAY[]::int[], ARRAY[[[]]]::text[]),
+                (4, ARRAY[[[[1]]]], '{{{a}}}'::text[]),
+                (5, '[-2:0]={1,2,3}'::int[], '[-1:0][4:5]={{a,b},{c,d}}'::text[])
+            """
+        )
+
+        expected_ids = [1, 2, 3, 4, 5]
+        expected_a = [ [ 1, 2, 3, 4, None, 5 ], None, [], [1], [1, 2, 3] ]
+        expected_b = [ [ None, "b", "c", None ], None, [], ["a"], ["a", "b", "c", "d"] ]
+        plain_df = pl.read_parquet(plain_file)
+        self.assertEqual(plain_df["id"].to_list(), expected_ids)
+        self.assertEqual(plain_df["a"].to_list(), expected_a)
+        self.assertEqual(plain_df["b"].to_list(), expected_b)
+
+        dims_file = wrappers.run_export_table("arrays_multidim_dims", "arrays_multidim", "id", options=["--array-handling=dims"])
+        dims_df = pl.read_parquet(dims_file)
+        self.assertEqual(dims_df["id"].to_list(), expected_ids)
+        self.assertEqual(dims_df["a"].struct.field("data").to_list(), expected_a)
+        self.assertEqual(dims_df["b"].struct.field("data").to_list(), expected_b)
+        self.assertEqual(dims_df["a"].struct.field("dims").to_list(), [ [3, 2], None, [], [1, 1, 1, 1], [3] ])
+        self.assertEqual(dims_df["b"].struct.field("dims").to_list(), [ [2, 2], None, [], [1, 1, 1], [2, 2] ])
+
+        dims_lb_file = wrappers.run_export_table("arrays_multidim_dims_lb", "arrays_multidim", "id", options=["--array-handling=dims+lb"])
+        dims_lb_df = pl.read_parquet(dims_lb_file)
+        self.assertEqual(dims_lb_df["id"].to_list(), expected_ids)
+        self.assertEqual(dims_lb_df["a"].struct.field("data").to_list(), expected_a)
+        self.assertEqual(dims_lb_df["b"].struct.field("data").to_list(), expected_b)
+        self.assertEqual(dims_lb_df["a"].struct.field("dims").to_list(), [ [3, 2], None, [], [1, 1, 1, 1], [3] ])
+        self.assertEqual(dims_lb_df["a"].struct.field("lower_bound").to_list(), [ [1, 1], None, [], [1, 1, 1, 1], [-2] ])
+        self.assertEqual(dims_lb_df["b"].struct.field("lower_bound").to_list(), [ [1, 1], None, [], [1, 1, 1], [-1, 4] ])
+

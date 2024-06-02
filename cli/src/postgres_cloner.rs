@@ -6,6 +6,7 @@ use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::error::Error;
@@ -21,8 +22,9 @@ use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
 use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr, GroupTypeBuilder};
 
+use crate::datatypes::array::{PgMultidimArray, PgMultidimArrayLowerBounds};
 use crate::PostgresConnArgs;
-use crate::appenders::{ColumnAppender, DynamicMergedAppender, RealMemorySize, ArrayColumnAppender, ColumnAppenderBase, GenericColumnAppender, BasicPgRowColumnAppender, RcWrapperAppender, StaticMergedAppender, new_autoconv_generic_appender, PreprocessExt, new_static_merged_appender, DynColumnAppender};
+use crate::appenders::{new_autoconv_generic_appender, new_static_merged_appender, ArrayColumnAppender, BasicPgRowColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, GenericColumnAppender, PreprocessAppender, PreprocessExt, RcWrapperAppender, RealMemorySize, StaticMergedAppender};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
@@ -42,6 +44,7 @@ pub struct SchemaSettings {
 	pub numeric_handling: SchemaSettingsNumericHandling,
 	pub decimal_scale: i32,
 	pub decimal_precision: u32,
+	pub array_handling: SchemaSettingsArrayHandling,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -93,6 +96,18 @@ pub enum SchemaSettingsNumericHandling {
 	String
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
+pub enum SchemaSettingsArrayHandling {
+	/// Postgres arrays are simply stored as Parquet LIST
+	Plain,
+	/// Postgres arrays are stored as struct of { data: List[T], dims: List[int] }
+	#[clap(alias="dims")]
+	Dimensions,
+	/// Postgres arrays are stored as struct of { data: List[T], dims: List[int], lower_bound: List[int] }
+	#[clap(name="dimensions+lowerbound", alias="dimensions+lower_bound", alias="dimensions+lower-bound", alias="dims+lb")]
+	DimensionsAndLowerBound,
+}
+
 pub fn default_settings() -> SchemaSettings {
 	SchemaSettings {
 		macaddr_handling: SchemaSettingsMacaddrHandling::Text,
@@ -102,6 +117,7 @@ pub fn default_settings() -> SchemaSettings {
 		numeric_handling: SchemaSettingsNumericHandling::Double,
 		decimal_scale: 18,
 		decimal_precision: 38,
+		array_handling: SchemaSettingsArrayHandling::Plain,
 	}
 }
 
@@ -360,24 +376,43 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 			let (element_appender, element_schema) = map_schema_column(element_type, &element_column, settings)?;
 			
 			debug_assert_eq!(element_schema.name(), "element");
-			let list_schema = ParquetType::group_type_builder("list")
-				.with_repetition(Repetition::REPEATED)
-				.with_fields(&mut vec![
-					Arc::new(element_schema)
-				])
-				.build().unwrap();
 
-			let schema = ParquetType::group_type_builder(c.col_name())
-				.with_logical_type(Some(LogicalType::List))
-				.with_repetition(Repetition::OPTIONAL)
-				.with_fields(&mut vec![
-					Arc::new(list_schema)
-				])
-				.build().unwrap();
+			let plain_schema = settings.array_handling == SchemaSettingsArrayHandling::Plain;
+
+			let schema = if plain_schema {
+				make_list_schema(c.col_name(), Repetition::OPTIONAL, element_schema)
+			} else {
+				make_list_schema("data", Repetition::REQUIRED, element_schema)
+			};
+
 			assert_eq!(element_appender.max_dl(), element_column.definition_level + 1);
 			assert_eq!(element_appender.max_rl(), element_column.repetition_level);
-			let array_appender = create_array_appender(element_appender, &c);
-			Ok((Box::new(array_appender), schema))
+			let array_appender = create_array_appender(element_appender, &c, plain_schema);
+			let dim_appender = create_array_dim_appender::<PgAny, TRow>(&c);
+			let lb_appender = create_array_lower_bound_appender::<PgAny, TRow>(&c);
+			let dim_schema = make_list_schema("dims", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: false })).build().unwrap());
+			let lb_schema = make_list_schema("lower_bound", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: true })).build().unwrap());
+			match settings.array_handling {
+				SchemaSettingsArrayHandling::Plain => Ok((Box::new(array_appender), schema)),
+				SchemaSettingsArrayHandling::Dimensions => Ok((
+					Box::new(
+						new_static_merged_appender(c.definition_level + 1, c.repetition_level).add_appender(array_appender).add_appender(dim_appender)
+					),
+					ParquetType::group_type_builder(c.col_name())
+						.with_repetition(Repetition::OPTIONAL)
+						.with_fields(&mut vec![ Arc::new(schema), Arc::new(dim_schema) ])
+						.build().unwrap()
+				)),
+				SchemaSettingsArrayHandling::DimensionsAndLowerBound => Ok((
+					Box::new(
+						new_static_merged_appender(c.definition_level + 1, c.repetition_level).add_appender(array_appender).add_appender(dim_appender).add_appender(lb_appender)
+					),
+					ParquetType::group_type_builder(c.col_name())
+						.with_repetition(Repetition::OPTIONAL)
+						.with_fields(&mut vec![ Arc::new(schema), Arc::new(dim_schema), Arc::new(lb_schema) ])
+						.build().unwrap()
+				))
+			}
 		},
 		Kind::Domain(ref element_type) => {
 			map_schema_column(element_type, c, settings)
@@ -444,6 +479,20 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 	}
 }
 
+fn make_list_schema(name: &str, repetition: Repetition, element_schema: ParquetType) -> ParquetType {
+	ParquetType::group_type_builder(name)
+		.with_logical_type(Some(LogicalType::List))
+		.with_repetition(repetition)
+		.with_fields(&mut vec![
+			Arc::new(ParquetType::group_type_builder("list")
+				.with_repetition(Repetition::REPEATED)
+				.with_fields(&mut vec![
+					Arc::new(element_schema)
+				])
+				.build().unwrap())
+		])
+		.build().unwrap()
+}
 
 fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 	t: &PgType,
@@ -641,11 +690,56 @@ fn create_complex_appender<T: for <'a> FromSql<'a> + Clone + 'static, TRow: PgAb
 	wrap_pg_row_reader(c, RcWrapperAppender::new(main_cp))
 }
 
-fn create_array_appender<TRow: PgAbstractRow + Clone>(inner: DynColumnAppender<PgAny>, c: &ColumnInfo) -> impl ColumnAppender<TRow> {
+fn create_array_appender<TRow: PgAbstractRow + Clone>(inner: DynColumnAppender<PgAny>, c: &ColumnInfo, warn_on_multidim: bool) -> impl ColumnAppender<TRow> {
 	let outer_dl = c.definition_level + 1;
 	debug_assert_eq!(outer_dl + 2, inner.max_dl());
 	let array_appender = ArrayColumnAppender::new(inner, true, true, outer_dl, c.repetition_level);
-	wrap_pg_row_reader::<TRow, Vec<Option<PgAny>>>(c, array_appender)
+	let warned = AtomicBool::new(false);
+	let col_clone = c.clone();
+	let multidim_appender = array_appender.preprocess(move |x: Cow<PgMultidimArray<Option<PgAny>>>| {
+		if warn_on_multidim && x.dims.is_some() && !warned.load(Ordering::Relaxed) {
+			if !warned.fetch_or(true, Ordering::SeqCst) {
+				eprintln!("Warning: Column {} contains a {}-dimensional array which will be flattened in Parquet (i.e. {} -> {}). Use --array-handling=dimensions, include another column with the PostgreSQL array dimensions.",
+					col_clone.full_name(),
+					x.dims.as_ref().unwrap().len(),
+					x.dims.as_ref().unwrap().iter().map(|x| x.to_string()).collect::<Vec<_>>().join("x"),
+					x.data.len()
+				)
+			}
+		}
+		match x {
+			Cow::Owned(x) => Cow::Owned(x.data),
+			Cow::Borrowed(x) => Cow::Borrowed(&x.data)
+		}
+	});
+	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<PgAny>>>(c, multidim_appender)
+}
+
+fn create_array_dim_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
+	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level + 1);
+	let dim_appender =
+		ArrayColumnAppender::new(int_appender, false, false, c.definition_level + 1, c.repetition_level)
+			.preprocess(|x: Cow<PgMultidimArray<Option<T>>>| Cow::<Vec<Option<i32>>>::Owned(
+				x.dims.as_ref()
+					.map(|x| x.iter().map(|c| Some(*c)).collect())
+					.unwrap_or_else(|| if x.data.len() == 0 { Vec::new() } else { vec![Some(x.data.len() as i32)] })
+			));
+	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<T>>>(c, dim_appender)
+}
+
+
+fn create_array_lower_bound_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
+	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level + 1);
+	let dim_appender =
+		ArrayColumnAppender::new(int_appender, false, false, c.definition_level + 1, c.repetition_level)
+			.preprocess(|x: Cow<PgMultidimArray<Option<T>>>| Cow::<Vec<Option<i32>>>::Owned(
+				match &x.lower_bounds {
+					_ if x.data.len() == 0 => Vec::new(),
+					PgMultidimArrayLowerBounds::Const(c) => vec![Some(*c); x.dims.as_ref().map(|x| x.len()).unwrap_or(1)],
+					PgMultidimArrayLowerBounds::PerDim(v) => v.iter().map(|x| Some(*x)).collect()
+				}
+			));
+	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<T>>>(c, dim_appender)
 }
 
 fn wrap_pg_row_reader<TRow: PgAbstractRow + Clone, T: Clone + for <'a> FromSql<'a>>(c: &ColumnInfo, a: impl ColumnAppender<T>) -> impl ColumnAppender<TRow> {

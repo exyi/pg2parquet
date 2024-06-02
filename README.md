@@ -134,6 +134,9 @@ Options:
           - prefer:  Attempt to connect with TLS but allow sessions without (default behavior compiled with SSL support)
           - require: Require the use of TLS
 
+      --ssl-root-cert <SSL_ROOT_CERT>
+          File with a TLS root certificate in PEM or DER (.crt) format. When specified, the default CA certificates are considered untrusted. The option can be specified multiple times. Using this options implies --sslmode=require
+
       --macaddr-handling <MACADDR_HANDLING>
           How to handle `macaddr` columns
           
@@ -175,7 +178,7 @@ Options:
       --numeric-handling <NUMERIC_HANDLING>
           How to handle `numeric` columns
           
-          [default: decimal]
+          [default: double]
 
           Possible values:
           - decimal: Numeric is stored using the DECIMAL parquet type. Use --decimal-precision and --decimal-scale to set the desired precision and scale
@@ -184,7 +187,7 @@ Options:
           - string:  Convert the numeric to a string and store it as UTF8 text. This option never looses precision. Note that text "NaN" may be present if NaN is present in the database
 
       --decimal-scale <DECIMAL_SCALE>
-          How many decimal digits after the decimal point are stored in the Parquet file
+          How many decimal digits after the decimal point are stored in the Parquet file in DECIMAL data type
           
           [default: 18]
 
@@ -192,4 +195,14 @@ Options:
           How many decimal digits are allowed in numeric/DECIMAL column. By default 38, the largest value which fits in 128 bits. If <= 9, the column is stored as INT32; if <= 18, the column is stored as INT64; otherwise BYTE_ARRAY
           
           [default: 38]
+
+      --array-handling <ARRAY_HANDLING>
+          Parquet does not support multi-dimensional arrays and arrays with different starting index. pg2parquet flattens the arrays, and this options allows including the stripped information in additional columns
+          
+          [default: plain]
+
+          Possible values:
+          - plain:                 Postgres arrays are simply stored as Parquet LIST
+          - dimensions:            Postgres arrays are stored as struct of { data: List[T], dims: List[int] }
+          - dimensions+lowerbound: Postgres arrays are stored as struct of { data: List[T], dims: List[int], lower_bound: List[int] }
 ```
