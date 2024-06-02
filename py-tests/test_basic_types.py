@@ -102,11 +102,12 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(list(polars_df["f32"].cast(str)), ['1.1', 'NaN', 'inf', '-inf', '-0.0'])
         self.assertEqual(list(polars_df["f64"].cast(str)), ['2.2', 'NaN', 'inf', '-inf', '-0.0'])
 
-    def test_numeric(self):
+    def test_decimal(self):
         file = wrappers.create_and_export(
             "numeric_types", "id",
             "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
-            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')"
+            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
+            options=["--numeric-handling=decimal"]
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
@@ -122,18 +123,18 @@ class TestBasic(unittest.TestCase):
         #     "high_precision": pl.Binary
         # })
 
-        file2 = wrappers.run_export("numeric_types_higher_prec", "select * from numeric_types order by id", options=["--decimal-precision=76", "--decimal-scale=50"])
+        file2 = wrappers.run_export("numeric_types_higher_prec", "select * from numeric_types order by id", options=["--decimal-precision=76", "--decimal-scale=50", "--numeric-handling=decimal"])
         # only PyArrow supports precision=76
         pd_df = pd.read_parquet(file2, engine="pyarrow")
         self.assertEqual(list(pd_df["normal"]), [Decimal('1000.000100000000000000'), None])
         self.assertEqual(list(pd_df["high_precision"]), [Decimal('1.00000000000000000000000000000000000000000001'), None])
 
-    def test_numeric_i32(self):
+    def test_decimal_i32(self):
         file = wrappers.create_and_export(
             "numeric_types", "id",
             "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
             "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
-            options=["--decimal-precision=9", "--decimal-scale=4"]
+            options=["--decimal-precision=9", "--decimal-scale=4", "--numeric-handling=decimal"]
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
@@ -141,12 +142,12 @@ class TestBasic(unittest.TestCase):
             (2,  None, None )
         ])
 
-    def test_numeric_i64(self):
+    def test_decimal_i64(self):
         file = wrappers.create_and_export(
             "numeric_types", "id",
             "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
             "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
-            options=["--decimal-precision=18", "--decimal-scale=9"]
+            options=["--decimal-precision=18", "--decimal-scale=9", "--numeric-handling=decimal"]
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
@@ -158,7 +159,7 @@ class TestBasic(unittest.TestCase):
             "numeric_types", "id",
             "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
             "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
-            options=["--numeric-handling=double"]
+            #options=["--numeric-handling=double"]
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table[0], (1, 1000.0001, 1))

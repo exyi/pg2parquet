@@ -17,7 +17,8 @@ class TestBasic(unittest.TestCase):
             """(1, Array['a', 'b'], Array[1, 2], Array['\\x01'::bytea, '\\x02'::bytea], Array[1.1, 2.2]),
                (2, NULL, NULL, NULL, NULL),
                (3, Array[NULL, 'a', NULL, 'b'], Array[]::int[], Array[NULL::bytea], Array[1.1, 'NaN'::numeric, 1000010])
-            """
+            """,
+            options=["--numeric-handling=decimal"]
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table[0], (1, ["a", "b"], [1, 2], [ b"\x01", b"\x02" ], [Decimal("1.10"), Decimal("2.20")]))
@@ -63,7 +64,8 @@ class TestBasic(unittest.TestCase):
                 (1, '[1,2)', ARRAY['[1,2)'::int4range,'[2,3)'], ARRAY['[1.1,2.2)'::numrange,'[2.2,3.3)'], ARRAY['[2020-01-01 00:00:00,2020-01-02 00:00:00)'::tsrange,'[2020-01-02 00:00:00,2020-01-03 00:00:00)'::tsrange]),
                 (2, NULL, NULL, NULL, NULL),
                 (3, '(,2]', ARRAY[NULL::int4range, '(2,)', 'empty'], ARRAY['(1.1,)'::numrange,'(,)'], ARRAY[]::tsrange[])
-            """
+            """,
+            options=["--numeric-handling=decimal"]
         )
         def r(low, up, low_inc=True, up_inc=False, is_empty=False):
             return {'lower': low, 'upper': up, 'lower_inclusive': low_inc, 'upper_inclusive': up_inc, 'is_empty': is_empty}
