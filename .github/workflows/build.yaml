@@ -5,6 +5,8 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
+  schedule:
+    - cron: '46 5 7 * *' # At 05:46 on day-of-month 1 in every 3rd month from January through December
 
 jobs:
   build-rust:
