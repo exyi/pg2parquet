@@ -6,7 +6,7 @@ Simple tool for exporting PostgreSQL tables into parquet, with support for more 
 
 ### Download Binary from Github
 
-Download the binary from [Github Actions](https://github.com/exyi/pg2parquet/actions/workflows/build.yml?query=branch%3Amain) artifacts (click on the latest run, scroll to the bottom, choose your system).
+Download the binary from [Github Actions](https://github.com/exyi/pg2parquet/actions/workflows/build.yaml?query=branch%3Amain) artifacts (click on the latest run, scroll to the bottom, choose your system).
 
 ### Using Nix flakes
 
