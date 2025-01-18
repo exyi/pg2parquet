@@ -21,11 +21,11 @@ pub fn create_something(file_path: &std::path::PathBuf) {
 
 	let schema =
 		Type::group_type_builder("root")
-			.with_fields(&mut vec![
+			.with_fields(vec![
 				Type::primitive_type_builder("id", basic::Type::INT32).build().unwrap().arc(),
 
 				Type::group_type_builder("nested")
-					.with_fields(&mut vec![
+					.with_fields(vec![
 						Type::primitive_type_builder("x", basic::Type::INT32)
 							.with_repetition(Repetition::REPEATED).build().unwrap().arc(),
 						Type::primitive_type_builder("y", basic::Type::INT64)

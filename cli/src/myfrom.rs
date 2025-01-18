@@ -66,7 +66,7 @@ impl MyFrom<chrono::DateTime<chrono::Utc>> for i64 {
 
 impl MyFrom<chrono::NaiveDateTime> for i64 {
 	fn my_from(t: chrono::NaiveDateTime) -> Self {
-		t.timestamp_micros()
+		t.and_utc().timestamp_micros()
 	}
 }
 
