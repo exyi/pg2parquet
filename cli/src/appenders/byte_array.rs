@@ -92,12 +92,9 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 		// 	println!("           RLS: {:?}", self.rls);
 		// 	println!("           DLS: {:?}", self.dls);
 		// }
-		// let mut byte_array = Vec::new();
-		// std::mem::swap(&mut self.byte_buffer, &mut byte_array);
-		let byte_array = unsafe {
-			// Bytes is leaking memory for some reason
-			Bytes::from_static(std::mem::transmute::<&[u8], &'static [u8]>(&self.byte_buffer))
-		};
+		let mut byte_array = Vec::new();
+		std::mem::swap(&mut self.byte_buffer, &mut byte_array);
+		let byte_array = Bytes::from(byte_array);
 
 		let mut column: Vec<ByteArray> = vec![ByteArray::new(); self.offsets.len()];
 		for ((&offset, &next), out) in self.offsets.iter().zip(self.offsets.iter().skip(1)).zip(column.iter_mut()) {
@@ -111,8 +108,7 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 		std::mem::drop(column);
 
 		self.offsets.clear();
-		self.byte_buffer.clear();
-		// self.byte_buffer.reserve(byte_array.len() / 4);
+		self.byte_buffer.reserve(byte_array.len());
 		assert_eq!(0, self.byte_buffer.len());
 		self.dls.clear();
 		self.rls.clear();
