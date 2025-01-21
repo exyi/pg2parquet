@@ -5,10 +5,13 @@ description = ""
 authors = ["Standa Lukeš <git@exyi.cz>"]
 packages = [{include = "pg2parquet_pytests"}]
 
+[project]
+requires-python = ">=3.12,<3.13"
+
 [tool.poetry.dependencies]
 python = "^3.11"
 numpy = "1.26.4"
-pyarrow = "^16.1.0"
+pyarrow = "^19.0.0"
 psycopg = "^3.1.19"
 duckdb = "^0.10.2"
 polars = "^0.20.26"
