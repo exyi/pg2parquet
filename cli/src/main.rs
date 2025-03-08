@@ -6,6 +6,9 @@ use clap::{Parser, ValueEnum, Command};
 use parquet::{basic::{ZstdLevel, BrotliLevel, GzipLevel, Compression}, file::properties::DEFAULT_WRITE_BATCH_SIZE};
 use postgres_cloner::{SchemaSettingsArrayHandling, SchemaSettingsEnumHandling, SchemaSettingsFloat16Handling, SchemaSettingsIntervalHandling, SchemaSettingsJsonHandling, SchemaSettingsMacaddrHandling, SchemaSettingsNumericHandling};
 
+#[macro_use] extern crate serde;
+#[macro_use] extern crate serde_json;
+
 mod postgresutils;
 mod myfrom;
 mod level_index;
@@ -14,8 +17,11 @@ mod playground;
 mod parquet_writer;
 mod postgres_cloner;
 mod pg_custom_types;
+mod pg_schema_inferrer;
+mod pg_utils;
 mod datatypes;
 mod appenders;
+mod rustutils;
 
 #[cfg(not(any(target_family = "windows", target_arch = "riscv64")))]
 use jemallocator::Jemalloc;
