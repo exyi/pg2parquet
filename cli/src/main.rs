@@ -4,7 +4,7 @@ use std::{sync::Arc, path::PathBuf, process};
 
 use clap::{Parser, ValueEnum, Command};
 use parquet::{basic::{ZstdLevel, BrotliLevel, GzipLevel, Compression}, file::properties::DEFAULT_WRITE_BATCH_SIZE};
-use postgres_cloner::{SchemaSettingsArrayHandling, SchemaSettingsEnumHandling, SchemaSettingsIntervalHandling, SchemaSettingsJsonHandling, SchemaSettingsMacaddrHandling, SchemaSettingsNumericHandling};
+use postgres_cloner::{SchemaSettingsArrayHandling, SchemaSettingsEnumHandling, SchemaSettingsFloat16Handling, SchemaSettingsIntervalHandling, SchemaSettingsJsonHandling, SchemaSettingsMacaddrHandling, SchemaSettingsNumericHandling};
 
 mod postgresutils;
 mod myfrom;
@@ -134,6 +134,9 @@ pub struct SchemaSettingsArgs {
     /// Parquet does not support multi-dimensional arrays and arrays with different starting index. pg2parquet flattens the arrays, and this options allows including the stripped information in additional columns.
     #[arg(long, hide_short_help = true, default_value = "plain")]
     array_handling: SchemaSettingsArrayHandling,
+    /// 
+    #[arg(long, hide_short_help = true, default_value = "float32")]
+    float16_handling: SchemaSettingsFloat16Handling,
 }
 
 
@@ -236,6 +239,7 @@ fn perform_export(args: ExportArgs) {
         decimal_scale: args.schema_settings.decimal_scale,
         decimal_precision: args.schema_settings.decimal_precision,
         array_handling: args.schema_settings.array_handling,
+        float16_handling: args.schema_settings.float16_handling,
     };
     let query = args.query.unwrap_or_else(|| {
         format!("SELECT * FROM {}", args.table.unwrap())
