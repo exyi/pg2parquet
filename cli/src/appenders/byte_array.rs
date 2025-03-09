@@ -105,10 +105,11 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 		column[self.offsets.len()-1] = ByteArray::from(byte_array.slice(*self.offsets.last().unwrap()..));
 
 		let _num_written = writer_t.write_batch(&column, dls, rls)?;
-		std::mem::drop(column);
-
+		let buffer_length = byte_array.len();
+		std::mem::drop((column, byte_array));
+		
+		self.byte_buffer.reserve(buffer_length);
 		self.offsets.clear();
-		self.byte_buffer.reserve(byte_array.len());
 		assert_eq!(0, self.byte_buffer.len());
 		self.dls.clear();
 		self.rls.clear();
