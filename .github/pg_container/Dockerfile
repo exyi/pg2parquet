@@ -1,5 +1,5 @@
 ARG PG_VERSION
-FROM postgres:${PG_VERSION}-bookworm
+FROM docker.io/postgres:${PG_VERSION}-bookworm
 
 RUN apt-get update \
       && apt-cache showpkg postgresql-$PG_MAJOR-postgis-$POSTGIS_MAJOR \
