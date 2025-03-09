@@ -590,7 +590,7 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		"vector" => resolve_vector_conv::<pgvector::PgF32Vector, f32, FloatType, _, TRow>(name, c, None, None, None, |v| v),
 		"halfvec" => match s.float16_handling {
 			SchemaSettingsFloat16Handling::Float16 =>
-				resolve_vector_conv::<pgvector::PgF16Vector, f16, FixedLenByteArrayType, _, TRow>(name, c, None, None, None, |v|
+				resolve_vector_conv::<pgvector::PgF16Vector, f16, FixedLenByteArrayType, _, TRow>(name, c, Some(2), None, None, |v|
 					FixedLenByteArray::from(ByteArray::from(v.to_be_bytes().to_vec()))),
 			SchemaSettingsFloat16Handling::Float32 =>
 				resolve_vector_conv::<pgvector::PgF16Vector, f16, FloatType, _, TRow>(name, c, None, None, None, |v| v.into())
