@@ -59,6 +59,8 @@ pub fn new_static_merged_appender<T: Clone>(max_dl: i16, max_rl: i16) -> impl St
 pub trait StaticMergedAppender<T: Clone>: ColumnAppender<T> {
     fn add_appender<A: ColumnAppender<T>>(self, appender: A) -> StaticMergedAppenderImpl<T, A, Self>
         where Self: Sized {
+        assert_eq!(self.max_dl(), appender.max_dl());
+        assert_eq!(self.max_rl(), appender.max_rl());
         StaticMergedAppenderImpl { appender, next: self, _dummy: PhantomData }
     }
     fn add_appender_map<A: ColumnAppender<T2>, T2: Clone, F: Fn(Cow<T>) -> Cow<T2>>(self, appender: A, f: F) -> StaticMergedAppenderImpl<T, PreprocessAppender<T, T2, A, F>, Self>

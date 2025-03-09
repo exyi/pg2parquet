@@ -14,6 +14,8 @@ edition = "2021"
 [dependencies]
 parquet = { version = "54.0.0", default-features = false, features = ["zstd", "lz4", "flate2", "brotli", "snap", "base64"] }
 postgres = { version = "0.19.9", features = ["with-chrono-0_4", "with-serde_json-1", "with-bit-vec-0_6", "with-uuid-1", "with-geo-types-0_7", "with-eui48-1"] }
+pgvector = { version = "0.4", features = ["postgres", "halfvec"] }
+half = { version = "2.4.1" }
 clap = { version = "4.0.10", features = ["derive"] }
 uuid = "1.4.1"
 chrono = "0.4.26"
