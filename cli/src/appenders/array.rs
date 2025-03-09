@@ -55,9 +55,25 @@ impl<TPg: Clone, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner>
 	}	
 }
 
-impl<'a, TPg: Clone, TInner, TArray: Clone> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
+pub trait Nullable<T> {
+	const IS_NULLABLE: bool;
+	fn as_option(self) -> Option<T>;
+}
+
+impl<T> Nullable<T> for Option<T> {
+	const IS_NULLABLE: bool = true;
+	fn as_option(self) -> Option<T> { self }
+}
+
+impl<T> Nullable<T> for T {
+	const IS_NULLABLE: bool = false;
+	fn as_option(self) -> Option<T> { Some(self) }
+}
+
+impl<'a, TPg: Clone, TInner, TArray: Clone, TItem> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg>,
-		  TArray: IntoIterator<Item = Option<TPg>> + Clone {
+		  TArray: IntoIterator<Item = TItem> + Clone,
+		  TItem: Nullable<TPg> {
 
 	fn copy_value(&mut self, repetition_index: &LevelIndexList, array: Cow<TArray>) -> Result<usize, String> {
 		let mut bytes_written = 0;
@@ -65,7 +81,7 @@ impl<'a, TPg: Clone, TInner, TArray: Clone> ColumnAppender<TArray> for ArrayColu
 		let mut nested_ri = repetition_index.new_child();
 
 		for (_index, value) in array.into_owned().into_iter().enumerate() {
-			match value {
+			match value.as_option() {
 				Some(value) => {
 					bytes_written += self.inner.copy_value(&nested_ri, Cow::Owned(value))?;
 					nested_ri.inc();

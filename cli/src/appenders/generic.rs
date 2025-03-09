@@ -87,8 +87,8 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TP
 		}).map_err(|e| format!("Could not create column[{}]: {}", column_i, e))?;
 
 		debug_assert!(col_descriptor.is_some());
-		debug_assert_eq!(col_descriptor.as_ref().unwrap().0.max_def_level(), self.max_dl);
-		debug_assert_eq!(col_descriptor.as_ref().unwrap().0.max_rep_level(), self.max_rl);
+		debug_assert_eq!(col_descriptor.as_ref().unwrap().0.max_def_level(), self.max_dl, "unexpected max_dl={} in {}", self.max_dl, col_descriptor.as_ref().unwrap().0.path());
+		debug_assert_eq!(col_descriptor.as_ref().unwrap().0.max_rep_level(), self.max_rl, "unexpected max_rl={} in {}", self.max_rl, col_descriptor.as_ref().unwrap().0.path());
 
 		if error.is_some() {
 			let col_name = col_descriptor.map(|(desc, _, _)| desc.path().string()).unwrap_or_else(|| format!("column[{}]", column_i));

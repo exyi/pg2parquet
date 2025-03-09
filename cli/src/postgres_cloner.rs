@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::error::Error;
-use parquet::basic::{Repetition, self, ConvertedType, LogicalType};
+use parquet::basic::{self, ConvertedType, IntType, LogicalType, Repetition};
 use parquet::data_type::{DataType, BoolType, Int32Type, Int64Type, FloatType, DoubleType, ByteArray, ByteArrayType, FixedLenByteArrayType, FixedLenByteArray};
 use parquet::file::properties::WriterPropertiesPtr;
 use parquet::file::writer::SerializedFileWriter;
@@ -20,9 +20,11 @@ use postgres::error::SqlState;
 use postgres::types::{Kind, Type as PgType, FromSql};
 use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
 use postgres::fallible_iterator::FallibleIterator;
-use parquet::schema::types::{Type as ParquetType, TypePtr, GroupTypeBuilder};
+use parquet::schema::types::{GroupTypeBuilder, PrimitiveTypeBuilder, Type as ParquetType, TypePtr};
+use half::f16;
 
 use crate::datatypes::array::{PgMultidimArray, PgMultidimArrayLowerBounds};
+use crate::datatypes::pgvector::{self, PgSparseVector};
 use crate::PostgresConnArgs;
 use crate::appenders::{new_autoconv_generic_appender, new_static_merged_appender, ArrayColumnAppender, BasicPgRowColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, GenericColumnAppender, PreprocessAppender, PreprocessExt, RcWrapperAppender, RealMemorySize, StaticMergedAppender};
 use crate::datatypes::interval::PgInterval;
@@ -45,6 +47,7 @@ pub struct SchemaSettings {
 	pub decimal_scale: i32,
 	pub decimal_precision: u32,
 	pub array_handling: SchemaSettingsArrayHandling,
+	pub float16_handling: SchemaSettingsFloat16Handling,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -108,6 +111,14 @@ pub enum SchemaSettingsArrayHandling {
 	DimensionsAndLowerBound,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
+pub enum SchemaSettingsFloat16Handling {
+	/// Serialize float16 values as float32 for better compatibility. Usually, compression will handle this and it won't take significantly more space.
+	Float32,
+	/// Use Float16 parquet logical type. Currently, compatibility with other tools is limited and the implementation in pg2parquet has performance issues, but might offer a size reduction.
+	Float16
+}
+
 pub fn default_settings() -> SchemaSettings {
 	SchemaSettings {
 		macaddr_handling: SchemaSettingsMacaddrHandling::Text,
@@ -118,6 +129,7 @@ pub fn default_settings() -> SchemaSettings {
 		decimal_scale: 18,
 		decimal_precision: 38,
 		array_handling: SchemaSettingsArrayHandling::Plain,
+		float16_handling: SchemaSettingsFloat16Handling::Float32,
 	}
 }
 
@@ -574,6 +586,43 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Aclitem Bpchar Timetz Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
 
 
+		// pgvector extension: vector = 32-bit float array, halfvec = 16-bit float array, sparsevec = sparse f32 vector
+		"vector" => resolve_vector_conv::<pgvector::PgF32Vector, f32, FloatType, _, TRow>(name, c, None, None, None, |v| v),
+		"halfvec" => match s.float16_handling {
+			SchemaSettingsFloat16Handling::Float16 =>
+				resolve_vector_conv::<pgvector::PgF16Vector, f16, FixedLenByteArrayType, _, TRow>(name, c, None, None, None, |v|
+					FixedLenByteArray::from(ByteArray::from(v.to_be_bytes().to_vec()))),
+			SchemaSettingsFloat16Handling::Float32 =>
+				resolve_vector_conv::<pgvector::PgF16Vector, f16, FloatType, _, TRow>(name, c, None, None, None, |v| v.into())
+		},
+		"sparsevec" => {
+			let inner_appender = new_static_merged_appender::<(i32, f32)>(c.definition_level + 2, c.repetition_level + 1)
+				.add_appender(GenericColumnAppender::<_, Int32Type, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.0))
+				.add_appender(GenericColumnAppender::<_, FloatType, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.1));
+
+			let schema = ParquetType::group_type_builder(name)
+				.with_repetition(Repetition::OPTIONAL)
+				.with_fields(vec![
+					Arc::new(ParquetType::group_type_builder("key_value").with_repetition(Repetition::REPEATED).with_fields(vec![
+						Arc::new(ParquetType::primitive_type_builder("index", basic::Type::INT32)
+							.with_repetition(Repetition::REQUIRED)
+							.with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: false }))
+							.build().unwrap()),
+						Arc::new(ParquetType::primitive_type_builder("value", basic::Type::FLOAT)
+							.with_repetition(Repetition::REQUIRED)
+							.build().unwrap())
+					]).build().unwrap())
+				])
+				.with_converted_type(ConvertedType::MAP)
+				.with_logical_type(Some(LogicalType::Map))
+				.build().unwrap();
+
+			let array_appender = ArrayColumnAppender::new(inner_appender, true, false, c.definition_level + 1, c.repetition_level);
+
+			(Box::new(wrap_pg_row_reader::<TRow, PgSparseVector>(&c, array_appender)), schema)
+		}
+
+
 		n => 
 			return Err(format!("Could not map column {}, unsupported primitive type: {}", c.full_name(), n)),
 	})
@@ -642,9 +691,43 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, F
 	where TDataType: DataType, TDataType::T : RealMemorySize {
 	let mut c = c.clone();
 	c.definition_level += 1; // TODO: can we support NOT NULL fields?
+	let t =
+		build_primitive_pq_type(name, TDataType::get_physical_type(), length, logical_type, conv_type)
+		.build().unwrap();
+
+	let cp = create_primitive_appender::<T, TDataType, _, _>(&c, convert);
+	(Box::new(cp), t)
+}
+
+fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> + 'static, T: Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone + 'static>(
+	name: &str,
+	c: &ColumnInfo,
+	length: Option<i32>,
+	logical_type: Option<LogicalType>,
+	conv_type: Option<ConvertedType>,
+	convert: FConversion
+) -> ResolvedColumn<TRow>
+	where TDataType: DataType, TDataType::T : RealMemorySize {
+
+	let mut c = c.clone();
+	c.definition_level += 1; // TODO: NOT NULL fields
+	let t =
+		build_primitive_pq_type("element", TDataType::get_physical_type(), length, logical_type, conv_type)
+		.build().unwrap();
+
+	let arr_t = make_list_schema(name, Repetition::REQUIRED, t);
+
+	let inner_appender = GenericColumnAppender::<T, TDataType, FConversion>::new(c.definition_level + 1, c.repetition_level + 1, convert);
+	let array_appender = ArrayColumnAppender::new(inner_appender, true, false, c.definition_level, c.repetition_level);
+
+	let cp = wrap_pg_row_reader::<TRow, TArr>(&c, array_appender);
+	(Box::new(cp), arr_t)
+}
+
+fn build_primitive_pq_type(name: &str, data_type: parquet::basic::Type, length: Option<i32>, logical_type: Option<LogicalType>, conv_type: Option<ConvertedType>) -> PrimitiveTypeBuilder {
 	let mut t =
-		ParquetType::primitive_type_builder(name, TDataType::get_physical_type())
-		.with_converted_type(conv_type.unwrap_or(ConvertedType::NONE));
+		ParquetType::primitive_type_builder(name, data_type)
+			.with_converted_type(conv_type.unwrap_or(ConvertedType::NONE));
 
 	match length {
 		Some(l) => {
@@ -659,14 +742,10 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, F
 		},
 		_ => {}
 	};
-	
-	let t = t.with_logical_type(logical_type).build().unwrap();
 
-	let cp =
-		create_primitive_appender::<T, TDataType, _, _>(&c, convert);
-
-	(Box::new(cp), t)
+	t.with_logical_type(logical_type)
 }
+
 fn create_primitive_appender_simple<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + Clone + 'static>(
 	c: &ColumnInfo,
 ) -> DynColumnAppender<TRow>
