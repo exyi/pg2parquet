@@ -17,18 +17,40 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         target: [x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl]
+        rust_profile: [dev]
         pg_version: [ '16' ]
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             pg_version: '12' # oldest supported version as of 2024
+            rust_profile: dev
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            pg_version: '16'
+            rust_profile: ci-build
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            pg_version: '13'
+            rust_profile: dev
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            pg_version: '14'
+            rust_profile: dev
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            pg_version: '15'
+            rust_profile: dev
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            pg_version: '17'
+            rust_profile: dev
     steps:
     - uses: actions/checkout@v3
     - name: Set up and build
       uses: ./.github/setupandbuild
       with:
         rust_target: ${{ matrix.target }}
-        rust_profile: dev
+        rust_profile: ${{ matrix.rust_profile }}
     - name: Run Tests
       uses: ./.github/test
       with:
