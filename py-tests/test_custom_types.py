@@ -163,13 +163,13 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(pl_df["id"].to_list(), [1, 2, 3])
         self.assertEqual(pl_df["a"].to_list(), [
             {'pdbid': '1ehz', 'model': 1, 'chain': 'A'},
-            {'pdbid': None, 'model': None, 'chain': None}, # polars just doesn't support null structs
+            None,
             {'pdbid': None, 'model': None, 'chain': None}
         ])
         self.assertEqual(pl_df["b"].to_list(), [
             [],
             None,
-            [ {'pdbid': None, 'model': None, 'chain': None}, {'pdbid': '1ehz', 'model': 1, 'chain': 'A'}, {'pdbid': None, 'model': None, 'chain': 'A'}]
+            [ None, {'pdbid': '1ehz', 'model': 1, 'chain': 'A'}, {'pdbid': None, 'model': None, 'chain': 'A'}]
         ])
 
         pd_df = pd.read_parquet(file)
