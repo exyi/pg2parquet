@@ -6,17 +6,19 @@ authors = ["Standa Lukeš <git@exyi.cz>"]
 packages = [{include = "pg2parquet_pytests"}]
 
 [project]
-requires-python = ">=3.12,<3.13"
+name = "pg2parquet-pytests"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.12"
 
 [tool.poetry.dependencies]
-python = "^3.11"
-numpy = "1.26.4"
-pyarrow = "^19.0.0"
+numpy = "2.2.3"
+pyarrow = "^19.0.1"
 psycopg = "^3.1.19"
-duckdb = "^0.10.2"
-polars = "^0.20.26"
+duckdb = "^1.2.1"
+polars = "^1.24.0"
 pytest = "^8.2.0"
-pandas = "^2.2.2"
+pandas = "^2.2.3"
 
 [build-system]
 requires = ["poetry-core"]

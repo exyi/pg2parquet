@@ -23,11 +23,11 @@ runs:
 
   - uses: actions/setup-python@v4
     with:
-      python-version: 3.12
+      python-version: 3.13
 
   - uses: abatilo/actions-poetry@v2
     with:
-      poetry-version: 1.8.2
+      poetry-version: 2.1.1
 
   - run: poetry install --no-root
     working-directory: py-tests
@@ -36,7 +36,7 @@ runs:
   - run: poetry -C py-tests run python -m pytest
     shell: bash
     env:
-      PG2PARQUET_TEST_BIN: ${{ inputs.binary }}
+      PG2PARQUET_TEST_BIN: ../${{ inputs.binary }}
       PG2PARQUET_TEST_DB_HOST: 127.0.0.1
       PG2PARQUET_TEST_DB_PORT: 5432
       PG2PARQUET_TEST_DB_NAME: testdb

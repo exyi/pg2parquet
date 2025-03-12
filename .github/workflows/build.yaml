@@ -31,7 +31,7 @@ jobs:
         run: |
           strip output_dir/pg2parquet
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.rust_target }}
           path: output_dir/pg2parquet${{ matrix.rust_target == 'x86_64-pc-windows-gnu' && '.exe' || '' }}

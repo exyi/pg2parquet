@@ -296,8 +296,8 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(polars_df.schema, {
             "id": pl.Int32,
             "bits": pl.Utf8,
+            "varbits": pl.Utf8,
             "bool": pl.Boolean,
-            "varbits": pl.Utf8
         })
 
     
