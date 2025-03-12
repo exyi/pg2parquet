@@ -597,14 +597,15 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		},
 		"sparsevec" => {
 			let inner_appender = new_static_merged_appender::<(i32, f32)>(c.definition_level + 2, c.repetition_level + 1)
-				.add_appender(GenericColumnAppender::<_, Int32Type, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.0))
+				// index+1, because pgvector uses 0-based in binary, but 1-based in text and operators 
+				.add_appender(GenericColumnAppender::<_, Int32Type, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.0 + 1))
 				.add_appender(GenericColumnAppender::<_, FloatType, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.1));
 
 			let schema = ParquetType::group_type_builder(name)
 				.with_repetition(Repetition::OPTIONAL)
 				.with_fields(vec![
 					Arc::new(ParquetType::group_type_builder("key_value").with_repetition(Repetition::REPEATED).with_fields(vec![
-						Arc::new(ParquetType::primitive_type_builder("index", basic::Type::INT32)
+						Arc::new(ParquetType::primitive_type_builder("key", basic::Type::INT32)
 							.with_repetition(Repetition::REQUIRED)
 							.with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: false }))
 							.build().unwrap()),
