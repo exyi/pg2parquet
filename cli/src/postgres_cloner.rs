@@ -590,8 +590,8 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		"vector" => resolve_vector_conv::<pgvector::PgF32Vector, f32, FloatType, _, TRow>(name, c, None, None, None, |v| v),
 		"halfvec" => match s.float16_handling {
 			SchemaSettingsFloat16Handling::Float16 =>
-				resolve_vector_conv::<pgvector::PgF16Vector, f16, FixedLenByteArrayType, _, TRow>(name, c, Some(2), None, None, |v|
-					FixedLenByteArray::from(ByteArray::from(v.to_be_bytes().to_vec()))),
+				resolve_vector_conv::<pgvector::PgF16Vector, f16, FixedLenByteArrayType, _, TRow>(name, c, Some(2), Some(LogicalType::Float16), None, |v|
+					FixedLenByteArray::from(ByteArray::from(v.to_le_bytes().to_vec()))),
 			SchemaSettingsFloat16Handling::Float32 =>
 				resolve_vector_conv::<pgvector::PgF16Vector, f16, FloatType, _, TRow>(name, c, None, None, None, |v| v.into())
 		},
@@ -714,9 +714,10 @@ fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> 
 	c.definition_level += 1; // TODO: NOT NULL fields
 	let t =
 		build_primitive_pq_type("element", TDataType::get_physical_type(), length, logical_type, conv_type)
+		.with_repetition(Repetition::REQUIRED)
 		.build().unwrap();
 
-	let arr_t = make_list_schema(name, Repetition::REQUIRED, t);
+	let arr_t = make_list_schema(name, Repetition::OPTIONAL, t);
 
 	let inner_appender = GenericColumnAppender::<T, TDataType, FConversion>::new(c.definition_level + 1, c.repetition_level + 1, convert);
 	let array_appender = ArrayColumnAppender::new(inner_appender, true, false, c.definition_level, c.repetition_level);

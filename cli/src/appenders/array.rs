@@ -81,19 +81,16 @@ impl<'a, TPg: Clone, TInner, TArray: Clone, TItem> ColumnAppender<TArray> for Ar
 		let mut nested_ri = repetition_index.new_child();
 
 		for (_index, value) in array.into_owned().into_iter().enumerate() {
-			match value.as_option() {
-				Some(value) => {
-					bytes_written += self.inner.copy_value(&nested_ri, Cow::Owned(value))?;
-					nested_ri.inc();
-				},
-				None => {
-					if self.allow_element_null {
-						debug_assert_eq!(self.dl + 1, self.inner.max_dl() - 1);
-						bytes_written += self.inner.write_null(&nested_ri, self.dl + 1)?;
+			if TItem::IS_NULLABLE && self.allow_element_null {
+				bytes_written += self.inner.copy_value_opt(&nested_ri, Cow::Owned(value.as_option()))?;
+				nested_ri.inc();
+			} else {
+				match value.as_option() {
+					Some(value) => {
+						bytes_written += self.inner.copy_value(&nested_ri, Cow::Owned(value))?;
 						nested_ri.inc();
-					} else {
-						// skip
-					}
+					},
+					None => { }// skip
 				}
 			}
 		}
