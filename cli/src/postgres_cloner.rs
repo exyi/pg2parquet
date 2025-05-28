@@ -127,7 +127,7 @@ fn read_password(user: &str) -> Result<String, String> {
 }
 
 #[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64"))))]
-fn build_tls_connector(certificates: &Option<Vec<PathBuf>>) -> Result<postgres_native_tls::MakeTlsConnector, String> {
+fn build_tls_connector(certificates: &Option<Vec<PathBuf>>, accept_invalid_certs: bool) -> Result<postgres_native_tls::MakeTlsConnector, String> {
 	fn load_cert(f: &PathBuf) -> Result<native_tls::Certificate, String> {
 		let bytes = std::fs::read(f).map_err(|e| format!("Failed to read certificate file {:?}: {}", f, e))?;
 		if let Ok(pem) = native_tls::Certificate::from_pem(&bytes) {
@@ -140,6 +140,8 @@ fn build_tls_connector(certificates: &Option<Vec<PathBuf>>) -> Result<postgres_n
 		Err(format!("Failed to load certificate from file {:?}", f))
 	}
 	let mut builder = native_tls::TlsConnector::builder();
+	builder.danger_accept_invalid_certs(accept_invalid_certs);
+	builder.danger_accept_invalid_hostnames(accept_invalid_certs);
 	match certificates {
 		None => {},
 		Some(certificates) => {
@@ -185,12 +187,14 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 		None | Some(crate::SslMode::Disable) => {},
 		Some(x) => return Err(format!("SSL/TLS is disabled in this build of pg2parquet, so ssl mode {:?} cannot be used. Only 'disable' option is allowed.", x)),
 	}
+	let mut allow_invalid_certs = false;
 	match &args.sslmode {
 		None => {
 			if args.ssl_root_cert.is_some() {
 				pg_config.ssl_mode(postgres::config::SslMode::Require);
 			} else {
 				pg_config.ssl_mode(postgres::config::SslMode::Prefer);
+				allow_invalid_certs = true;
 			}
 		},
 		Some(crate::SslMode::Disable) => {
@@ -198,13 +202,14 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 		},
 		Some(crate::SslMode::Prefer) => {
 			pg_config.ssl_mode(postgres::config::SslMode::Prefer);
+			allow_invalid_certs = true;
 		},
 		Some(crate::SslMode::Require) => {
 			pg_config.ssl_mode(postgres::config::SslMode::Require);
 		},
 	}
 
-	let connector = build_tls_connector(&args.ssl_root_cert)?;
+	let connector = build_tls_connector(&args.ssl_root_cert, allow_invalid_certs)?;
 
 	let client = pg_config.connect(connector).map_err(|e| format!("DB connection failed: {}", e.to_string()))?;
 
