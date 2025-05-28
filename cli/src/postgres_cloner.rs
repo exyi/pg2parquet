@@ -230,7 +230,8 @@ pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathB
 	let mut row_writer = ParquetRowWriter::new(pq_writer, schema.clone(), row_appender, quiet, settings)
 		.map_err(|e| format!("Failed to create row writer: {}", e))?;
 
-	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[]).unwrap();
+	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
+		.map_err(|err| format!("Failed to execute the SQL query: {}", err))?;
 	for row in rows.iterator() {
 		let row = row.map_err(|err| err.to_string())?;
 		let row = Arc::new(row);

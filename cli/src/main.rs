@@ -103,8 +103,14 @@ pub struct PostgresConnArgs {
 
 impl std::fmt::Debug for PostgresConnArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let password = self.password.as_ref().map(|_| "********");
-        f.debug_struct("PostgresConnArgs").field("host", &self.host).field("user", &self.user).field("dbname", &self.dbname).field("port", &self.port).field("password", &password).field("sslmode", &self.sslmode).field("ssl_root_cert", &self.ssl_root_cert).finish()
+        let mut s = f.debug_struct("PostgresConnArgs");
+        s.field("host", &self.host);
+        if let Some(user) = &self.user { s.field("user", &user); }
+        s.field("dbname", &self.dbname);
+        if let Some(port) = &self.port { s.field("port", port); }
+        if let Some(sslmode) = &self.sslmode { s.field("sslmode", sslmode); }
+        if let Some(ssl_root_cert) = &self.ssl_root_cert { s.field("ssl_root_cert", ssl_root_cert); }
+        s.finish()
     }
 }
 
