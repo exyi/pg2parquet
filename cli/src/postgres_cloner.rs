@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::Display;
+use std::fmt::{Display, Write as _};
 use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::net::IpAddr;
@@ -176,6 +176,21 @@ fn build_tls_connector(certificates: &Option<Vec<PathBuf>>, allow_invalid_certs:
 	Ok(NoTls)
 }
 
+fn process_conn_error(err: postgres::error::Error, args: &PostgresConnArgs) -> String {
+	let mut message = err.to_string();
+	if message.contains("error performing TLS handshake") && message.contains("certificate verify failed") {
+		message += "\n\n";
+		let looks_like_ip = args.host.parse::<IpAddr>().is_ok();
+
+		if args.ssl_root_cert.is_some() { message += "The certificate provided in --ssl-root-cert does't match the server certificate. You can use the option multiple times if you need to allow multiple certificates."; }
+		else { message += "To verify self-signed certificates, you can use the --ssl-root-cert option. You might also use the insecure --sslmode=prefer option which does not check the certificate."; }
+		if looks_like_ip { message += " Note that certificate verification commonly does not work when directly connecting to the server IP adress. You might need to specify a domain name matching the one in the certificate."; }
+		_ = write!(message, "\nYou can use `openssl s_client -showcerts -connect {}:{} -starttls postgres` to see which certificate is presented by the server.", args.host, args.port.unwrap_or(5432));
+	}
+
+	format!("DB connection failed: {}", message)
+}
+
 fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 	let user_env = std::env::var("PGUSER").ok();
 
@@ -223,7 +238,7 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 
 	let connector = build_tls_connector(&args.ssl_root_cert, allow_invalid_certs)?;
 
-	let client = pg_config.connect(connector).map_err(|e| format!("DB connection failed: {}", e.to_string()))?;
+	let client = pg_config.connect(connector).map_err(|e| process_conn_error(e, args))?;
 
 	Ok(client)
 }
