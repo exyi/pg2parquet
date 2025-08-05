@@ -243,10 +243,11 @@ fn perform_export(args: ExportArgs) {
         decimal_precision: args.schema_settings.decimal_precision,
         array_handling: args.schema_settings.array_handling,
     };
-    let query = args.query.unwrap_or_else(|| {
-        format!("SELECT * FROM {}", args.table.unwrap())
-    });
-    let result = postgres_cloner::execute_copy(&args.postgres, &query, &args.output_file, props, args.quiet, &settings);
+    let result = if let Some(table) = &args.table {
+        postgres_cloner::execute_copy_table(&args.postgres, table, &args.output_file, props, args.quiet, &settings)
+    } else {
+        postgres_cloner::execute_copy_query(&args.postgres, &args.query.unwrap(), &args.output_file, props, args.quiet, &settings)
+    };
     let _stats = handle_result(result);
 
     // eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);

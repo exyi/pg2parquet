@@ -2,6 +2,7 @@ use std::{sync::Arc, any::TypeId, io::Read};
 
 use byteorder::{ReadBytesExt, BigEndian};
 use postgres::types::{FromSql, Kind, WrongType, Field};
+use postgres::binary_copy::BinaryCopyOutRow;
 use postgres_protocol::types as pgtypes;
 
 fn read_pg_len(bytes: &[u8]) -> i32 {
@@ -312,6 +313,17 @@ impl<TRow: PgAbstractRow> PgAbstractRow for Arc<TRow> {
 
     fn ab_len(&self) -> usize {
         self.as_ref().ab_len()
+    }
+}
+
+impl PgAbstractRow for BinaryCopyOutRow {
+    fn ab_get<'a, T: FromSql<'a>>(&'a self, index: usize) -> T {
+        self.get(index)
+    }
+
+    fn ab_len(&self) -> usize {
+        // ab_len is not used in the current implementation
+        0
     }
 }
 
