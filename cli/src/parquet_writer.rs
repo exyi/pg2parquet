@@ -19,11 +19,11 @@ pub struct WriterSettings {
 	pub row_group_row_limit: usize
 }
 
-pub struct ParquetRowWriter<W: Write + Send> {
+pub struct ParquetRowWriter<W: Write + Send, T: PgAbstractRow = postgres::Row> {
 	writer: SerializedFileWriter<W>,
 	schema: parquet::schema::types::TypePtr,
 	// row_group_writer: SerializedRowGroupWriter<'a, W>,
-	appender: DynColumnAppender<Arc<postgres::Row>>,
+	appender: DynColumnAppender<Arc<T>>,
 	stats: WriterStats,
 	last_timestep_stats: WriterStats,
 	last_timestep_time: std::time::Instant,
@@ -35,11 +35,11 @@ pub struct ParquetRowWriter<W: Write + Send> {
 	current_group_rows: usize
 }
 
-impl <W: Write + Send> ParquetRowWriter<W> {
+impl<W: Write + Send, T: PgAbstractRow> ParquetRowWriter<W, T> {
 	pub fn new(
 		writer: SerializedFileWriter<W>,
 		schema: parquet::schema::types::TypePtr,
-		appender: DynColumnAppender<Arc<postgres::Row>>,
+		appender: DynColumnAppender<Arc<T>>,
 		quiet: bool,
 		settings: WriterSettings
 	) -> parquet::errors::Result<Self> {
@@ -83,10 +83,10 @@ impl <W: Write + Send> ParquetRowWriter<W> {
 		Ok(())
 	}
 
-	pub fn write_row(&mut self, row: Arc<postgres::Row>) -> Result<(), String> {
+	pub fn write_row(&mut self, row: Arc<T>) -> Result<(), String> {
 		let lvl = LevelIndexList::new_i(self.stats.rows);
 		let bytes = self.appender.copy_value(&lvl, Cow::Borrowed(&row))
-			.map_err(|e| format!("Could not copy Row[{}]:", identify_row(&row)) + &e)?;
+			.map_err(|e| format!("Could not copy row: {}", e))?;
 
 		self.current_group_bytes += bytes;
 		self.current_group_rows += 1;

@@ -19,6 +19,7 @@ use pg_bigdecimal::PgNumeric;
 use postgres::error::SqlState;
 use postgres::types::{Kind, Type as PgType, FromSql};
 use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
+use postgres::binary_copy::{BinaryCopyOutIter, BinaryCopyOutRow};
 use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{Type as ParquetType, TypePtr, GroupTypeBuilder};
 
@@ -31,7 +32,7 @@ use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::{new_decimal_bytes_appender, new_decimal_int_appender};
 use crate::myfrom::{MyFrom, self};
 use crate::parquet_writer::{WriterStats, ParquetRowWriter, WriterSettings};
-use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef, UnclonableHack};
+use crate::pg_custom_types::{PgAbstractRow, PgAny, PgEnum, PgRawRecord, PgRawRange, PgAnyRef, UnclonableHack};
 
 type ResolvedColumn<TRow> = (DynColumnAppender<TRow>, ParquetType);
 
@@ -216,33 +217,84 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 	Ok(client)
 }
 
-pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, quiet: bool, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
-
+pub fn execute_copy_query(pg_args: &PostgresConnArgs, query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, quiet: bool, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
 	let mut client = pg_connect(pg_args)?;
+	
 	let statement = client.prepare(query).map_err(|db_err| { db_err.to_string() })?;
+	let (row_appender, schema) = map_schema_root::<Row>(statement.columns(), schema_settings)?;
+	
+	execute_with_writer(output_file, output_props, quiet, schema, row_appender, |row_writer| {
+		let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
+			.map_err(|err| format!("Failed to execute the SQL query: {}", err))?;
+		for row in rows.iterator() {
+			let row = row.map_err(|err| err.to_string())?;
+			let row = Arc::new(row);
+			row_writer.write_row(row)?;
+		}
+		Ok(())
+	})
+}
 
-	let (row_appender, schema) = map_schema_root(statement.columns(), schema_settings)?;
+pub fn execute_copy_table(pg_args: &PostgresConnArgs, table_name: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, quiet: bool, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
+	let mut client = pg_connect(pg_args)?;
+	
+	if !quiet {
+		println!("Copying from table {} to {} using COPY with binary format...", table_name, output_file.display());
+	}
+	
+	let schema_query = format!("SELECT * FROM {} LIMIT 0", table_name);
+	let statement = client.prepare(&schema_query)
+		.map_err(|err| format!("Failed to prepare schema query: {}", err))?;
+	
+	let (row_appender, schema) = map_schema_root::<BinaryCopyOutRow>(statement.columns(), schema_settings)?;
+	
+	execute_with_writer(output_file, output_props, quiet, schema, row_appender, |row_writer| {
+		let copy_query = format!("COPY {} TO STDOUT (FORMAT BINARY)", table_name);
+		let copy_reader = client.copy_out(&copy_query)
+			.map_err(|err| format!("Failed to execute COPY command: {}", err))?;
+
+		let column_types: Vec<postgres::types::Type> =
+			statement.columns().iter().map(|col| col.type_().clone()).collect();
+
+		let mut binary_iter = BinaryCopyOutIter::new(copy_reader, &column_types);
+		while let Some(binary_row) = binary_iter.next()
+			.map_err(|err| format!("Failed to read binary row: {}", err))? {
+			
+			row_writer.write_row(Arc::new(binary_row))?;
+		}
+		Ok(())
+	})
+}
+
+fn execute_with_writer<T: PgAbstractRow, F>(
+	output_file: &PathBuf,
+	output_props: WriterPropertiesPtr, 
+	quiet: bool,
+	schema: ParquetType,
+	row_appender: DynColumnAppender<Arc<T>>,
+	data_processor: F
+) -> Result<WriterStats, String>
+where
+	F: FnOnce(&mut ParquetRowWriter<std::fs::File, T>) -> Result<(), String>
+{
 	if !quiet {
 		eprintln!("Schema: {}", format_schema(&schema, 0));
 	}
 	let schema = Arc::new(schema);
 
-	let settings = WriterSettings { row_group_byte_limit: 500 * 1024 * 1024, row_group_row_limit: output_props.max_row_group_size() };
+	let settings = WriterSettings { 
+		row_group_byte_limit: 500 * 1024 * 1024, 
+		row_group_row_limit: output_props.max_row_group_size() 
+	};
 
-	let output_file_f = std::fs::File::create(output_file).unwrap();
+	let output_file_f = std::fs::File::create(output_file)
+		.map_err(|e| format!("Failed to create output file: {}", e))?;
 	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props)
 		.map_err(|e| format!("Failed to create parquet writer: {}", e))?;
 	let mut row_writer = ParquetRowWriter::new(pq_writer, schema.clone(), row_appender, quiet, settings)
 		.map_err(|e| format!("Failed to create row writer: {}", e))?;
 
-	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
-		.map_err(|err| format!("Failed to execute the SQL query: {}", err))?;
-	for row in rows.iterator() {
-		let row = row.map_err(|err| err.to_string())?;
-		let row = Arc::new(row);
-
-		row_writer.write_row(row)?;
-	}
+	data_processor(&mut row_writer)?;
 
 	Ok(row_writer.close()?)
 }
@@ -329,8 +381,8 @@ fn count_columns(p: &ParquetType) -> usize {
 }
 
 
-fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<Arc<Row>>, String> {
-	let mut fields: Vec<ResolvedColumn<Arc<Row>>> = vec![];
+fn map_schema_root<TRow: PgAbstractRow + 'static>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<Arc<TRow>>, String> {
+	let mut fields: Vec<ResolvedColumn<Arc<TRow>>> = vec![];
 	for (col_i, c) in row.iter().enumerate() {
 
 		let t = c.type_();
@@ -342,7 +394,7 @@ fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedCol
 
 	let (column_appenders, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
 
-	let merged_appender: DynColumnAppender<Arc<Row>> = Box::new(DynamicMergedAppender::new(column_appenders, 0, 0));
+	let merged_appender: DynColumnAppender<Arc<TRow>> = Box::new(DynamicMergedAppender::new(column_appenders, 0, 0));
 	let struct_type = ParquetType::group_type_builder("root")
 		.with_fields(parquet_types.into_iter().map(Arc::new).collect())
 		.build()
