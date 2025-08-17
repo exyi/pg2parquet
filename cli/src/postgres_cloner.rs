@@ -180,65 +180,78 @@ fn process_conn_error(err: postgres::error::Error, args: &PostgresConnArgs) -> S
 	let mut message = err.to_string();
 	if message.contains("error performing TLS handshake") && message.contains("certificate verify failed") {
 		message += "\n\n";
-		let looks_like_ip = args.host.parse::<IpAddr>().is_ok();
+		let looks_like_ip = args.host.as_ref().is_some_and(|h| h.parse::<IpAddr>().is_ok());
 
 		if args.ssl_root_cert.is_some() { message += "The certificate provided in --ssl-root-cert does't match the server certificate. You can use the option multiple times if you need to allow multiple certificates."; }
 		else { message += "To verify self-signed certificates, you can use the --ssl-root-cert option. You might also use the insecure --sslmode=prefer option which does not check the certificate."; }
 		if looks_like_ip { message += " Note that certificate verification commonly does not work when directly connecting to the server IP adress. You might need to specify a domain name matching the one in the certificate."; }
-		_ = write!(message, "\nYou can use `openssl s_client -showcerts -connect {}:{} -starttls postgres` to see which certificate is presented by the server.", args.host, args.port.unwrap_or(5432));
+		_ = write!(message, "\nYou can use `openssl s_client -showcerts -connect {}:{} -starttls postgres` to see which certificate is presented by the server.", args.host.as_ref().unwrap_or(&"<HOST>".to_string()), args.port.unwrap_or(5432));
 	}
 
 	format!("DB connection failed: {}", message)
 }
 
 fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
-	let user_env = std::env::var("PGUSER").ok();
+	let mut config = postgres::Config::new();
 
-	let mut pg_config = postgres::Config::new();
-	pg_config.dbname(&args.dbname)
-		.application_name("pg2parquet")
-		.host(&args.host)
-		.port(args.port.unwrap_or(5432))
-		.user(args.user.as_ref().or(user_env.as_ref()).unwrap_or(&args.dbname));
+	if let Some(connection_string) = &args.connection_string {
+		config = connection_string.parse::<postgres::Config>()
+			.map_err(|e| format!("Failed to parse connection string: {}", e))?;
+	} else {
+		let user_env = std::env::var("PGUSER").ok();
+		let host = args.host.as_ref().unwrap();
+		let dbname = args.dbname.as_ref().unwrap();
+		config
+			.host(host)
+			.dbname(dbname)
+			.port(args.port.unwrap_or(5432))
+			.user(args.user.as_ref().or(user_env.as_ref()).unwrap_or(dbname));
+
+		#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64")))))]
+		match &args.sslmode {
+			None | Some(crate::SslMode::Disable) => {},
+			Some(x) => return Err(format!("SSL/TLS is disabled in this build of pg2parquet, so ssl mode {:?} cannot be used. Only 'disable' option is allowed.", x)),
+		}
+		match &args.sslmode {
+			None => {
+				if args.ssl_root_cert.is_some() {
+					config.ssl_mode(postgres::config::SslMode::Require);
+				} else {
+					config.ssl_mode(postgres::config::SslMode::Prefer);
+				}
+			},
+			Some(crate::SslMode::Disable) => {
+				config.ssl_mode(postgres::config::SslMode::Disable);
+			},
+			Some(crate::SslMode::Prefer) => {
+				config.ssl_mode(postgres::config::SslMode::Prefer);
+			},
+			Some(crate::SslMode::Require) => {
+				config.ssl_mode(postgres::config::SslMode::Require);
+			},
+		}
+	};
 
 	if let Some(password) = args.password.as_ref() {
-		pg_config.password(password);
+		config.password(password);
+	} else if config.get_password().is_none() {
+
 	} else if let Ok(password) = std::env::var("PGPASSWORD") {
-		pg_config.password(&password);
+		config.password(&password);
 	} else {
-		pg_config.password(&read_password(pg_config.get_user().unwrap())?.trim());
+		config.password(&read_password(config.get_user().unwrap())?.trim());
 	}
 
-	#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64")))))]
-	match &args.sslmode {
-		None | Some(crate::SslMode::Disable) => {},
-		Some(x) => return Err(format!("SSL/TLS is disabled in this build of pg2parquet, so ssl mode {:?} cannot be used. Only 'disable' option is allowed.", x)),
-	}
-	let mut allow_invalid_certs = false;
-	match &args.sslmode {
-		None => {
-			if args.ssl_root_cert.is_some() {
-				pg_config.ssl_mode(postgres::config::SslMode::Require);
-			} else {
-				pg_config.ssl_mode(postgres::config::SslMode::Prefer);
-				allow_invalid_certs = true;
-			}
-		},
-		Some(crate::SslMode::Disable) => {
-			pg_config.ssl_mode(postgres::config::SslMode::Disable);
-		},
-		Some(crate::SslMode::Prefer) => {
-			pg_config.ssl_mode(postgres::config::SslMode::Prefer);
-			allow_invalid_certs = true;
-		},
-		Some(crate::SslMode::Require) => {
-			pg_config.ssl_mode(postgres::config::SslMode::Require);
-		},
+	if config.get_application_name().is_none() {
+		config.application_name("pg2parquet");
 	}
 
+	// `Prefer` mode is succeptible to active attackers anyway due to downgrades,
+	// so we can allow untrusted (self-signed) certificates
+	let allow_invalid_certs = matches!(config.get_ssl_mode(), postgres::config::SslMode::Prefer);
 	let connector = build_tls_connector(&args.ssl_root_cert, allow_invalid_certs)?;
 
-	let client = pg_config.connect(connector).map_err(|e| process_conn_error(e, args))?;
+	let client = config.connect(connector).map_err(|e| process_conn_error(e, args))?;
 
 	Ok(client)
 }

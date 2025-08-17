@@ -80,14 +80,18 @@ enum SslMode {
 
 #[derive(clap::Args, Clone)]
 pub struct PostgresConnArgs {
+    /// PostgreSQL connection URL (postgres://...) or connection string. Mutually exclusive with individual connection parameters.
+    #[arg(long="connection", short='c', conflicts_with_all = ["host", "user", "dbname", "port", "password", "sslmode"], required_unless_present = "host")]
+    connection_string: Option<String>,
+
     /// Database server host
-    #[arg(short='H', long)]
-    host: String,
+    #[arg(short='H', long, required_unless_present = "connection_string")]
+    host: Option<String>,
     /// Database user name. If not specified, PGUSER environment variable is used.
     #[arg(short='U', long)]
     user: Option<String>,
-    #[arg(short='d', long)]
-    dbname: String,
+    #[arg(short='d', long, required_unless_present = "connection_string")]
+    dbname: Option<String>,
     #[arg(short='p', long)]
     port: Option<u16>,
     /// Password to use for the connection. It is recommended to use the PGPASSWORD environment variable instead, since process arguments are visible to other users on the system.
@@ -104,9 +108,18 @@ pub struct PostgresConnArgs {
 impl std::fmt::Debug for PostgresConnArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("PostgresConnArgs");
-        s.field("host", &self.host);
-        if let Some(user) = &self.user { s.field("user", &user); }
-        s.field("dbname", &self.dbname);
+        if let Some(connection_string) = &self.connection_string { 
+            let parsed = connection_string.parse::<postgres::config::Config>();
+            if matches!(parsed, Ok(c) if c.get_password().is_some()) {
+                // don't expose passswords in debug output
+                s.field("connection_string", &"<contains password>"); 
+            } else {
+                s.field("connection_string", connection_string);
+            }
+        }
+        if let Some(host) = &self.host { s.field("host", host); }
+        if let Some(user) = &self.user { s.field("user", user); }
+        if let Some(dbname) = &self.dbname { s.field("dbname", dbname); }
         if let Some(port) = &self.port { s.field("port", port); }
         if let Some(sslmode) = &self.sslmode { s.field("sslmode", sslmode); }
         if let Some(ssl_root_cert) = &self.ssl_root_cert { s.field("ssl_root_cert", ssl_root_cert); }
