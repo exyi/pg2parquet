@@ -81,16 +81,18 @@ enum SslMode {
 #[derive(clap::Args, Clone)]
 pub struct PostgresConnArgs {
     /// PostgreSQL connection URL (postgres://...) or connection string. Mutually exclusive with individual connection parameters.
-    #[arg(long="connection", short='c', conflicts_with_all = ["host", "user", "dbname", "port", "password", "sslmode"], required_unless_present = "host")]
+    /// The connection URL may be also provided using the DATABASE_URL environment variable (recommended if it contains a password)
+    /// See https://docs.rs/postgres/latest/postgres/config/struct.Config.html for a list of supported options
+    #[arg(long="connection", short='c', conflicts_with_all = ["host", "user", "dbname", "port", "password", "sslmode"])]
     connection_string: Option<String>,
 
     /// Database server host
-    #[arg(short='H', long, required_unless_present = "connection_string")]
+    #[arg(short='H', long)]
     host: Option<String>,
     /// Database user name. If not specified, PGUSER environment variable is used.
     #[arg(short='U', long)]
     user: Option<String>,
-    #[arg(short='d', long, required_unless_present = "connection_string")]
+    #[arg(short='d', long)]
     dbname: Option<String>,
     #[arg(short='p', long)]
     port: Option<u16>,
@@ -103,6 +105,20 @@ pub struct PostgresConnArgs {
     /// File with a TLS root certificate in PEM or DER (.crt) format. When specified, the default CA certificates are considered untrusted. The option can be specified multiple times. Using this options implies --sslmode=require.
     #[arg(long="ssl-root-cert", alias="tls-root-cert")]
     ssl_root_cert: Option<Vec<PathBuf>>
+}
+
+impl PostgresConnArgs {
+    fn validate(&self) -> Result<(), String> {
+        // Either connection_string or host+dbname are specified
+        if self.connection_string.is_some() || std::env::var("DATABASE_URL").is_ok() || std::env::var("POSTGRES_URL").is_ok() {
+            return Ok(());
+        }
+        if self.host.is_some() && self.dbname.is_some() {
+            return Ok(());
+        }
+
+        Err("Either --connection <CONNECTION_STRING> or --host <HOST> and --dbname <DBNAME> must be provided, or set the DATABASE_URL environment variable".to_string())
+    }
 }
 
 impl std::fmt::Debug for PostgresConnArgs {
@@ -270,7 +286,17 @@ fn perform_export(args: ExportArgs) {
 }
 
 fn parse_args() -> CliCommand {
-    CliCommand::parse()
+    let args = CliCommand::parse();
+    
+    // Validate connection arguments for Export command
+    if let CliCommand::Export(ref export_args) = args {
+        if let Err(err) = export_args.postgres.validate() {
+            eprintln!("Error: {}", err);
+            process::exit(2);
+        }
+    }
+    
+    args
 }
 
 fn main() {

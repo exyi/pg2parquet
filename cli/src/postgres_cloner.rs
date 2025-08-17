@@ -191,21 +191,35 @@ fn process_conn_error(err: postgres::error::Error, args: &PostgresConnArgs) -> S
 	format!("DB connection failed: {}", message)
 }
 
-fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
+fn use_env_var(name: &str, label: &str, quiet: bool) -> Option<String> {
+	match std::env::var(name) {
+		Err(_) => None,
+		Ok(var) => {
+			if !quiet {
+				println!("Reading {label} from `{name}` environment variable.");
+			}
+			Some(var)
+		}
+	}
+}
+
+fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<Client, String> {
 	let mut config = postgres::Config::new();
 
-	if let Some(connection_string) = &args.connection_string {
+	let connection_string = args.connection_string.clone()
+		.or_else(|| use_env_var("POSTGRES_URL", "DB connection URL", quiet))
+		.or_else(|| use_env_var("DATABASE_URL", "DB connection URL", quiet));
+	if let Some(connection_string) = connection_string {
 		config = connection_string.parse::<postgres::Config>()
 			.map_err(|e| format!("Failed to parse connection string: {}", e))?;
 	} else {
-		let user_env = std::env::var("PGUSER").ok();
 		let host = args.host.as_ref().unwrap();
 		let dbname = args.dbname.as_ref().unwrap();
 		config
 			.host(host)
 			.dbname(dbname)
 			.port(args.port.unwrap_or(5432))
-			.user(args.user.as_ref().or(user_env.as_ref()).unwrap_or(dbname));
+			.user(&args.user.clone().or_else(|| use_env_var("PGUSER", "DB user", quiet)).unwrap_or_else(|| dbname.clone()));
 
 		#[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64")))))]
 		match &args.sslmode {
@@ -234,9 +248,9 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 
 	if let Some(password) = args.password.as_ref() {
 		config.password(password);
-	} else if config.get_password().is_none() {
+	} else if !config.get_password().is_none() {
 
-	} else if let Ok(password) = std::env::var("PGPASSWORD") {
+	} else if let Some(password) = use_env_var("PGPASSWORD", "DB password", quiet) {
 		config.password(&password);
 	} else {
 		config.password(&read_password(config.get_user().unwrap())?.trim());
@@ -258,7 +272,7 @@ fn pg_connect(args: &PostgresConnArgs) -> Result<Client, String> {
 
 pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, quiet: bool, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
 
-	let mut client = pg_connect(pg_args)?;
+	let mut client = pg_connect(pg_args, quiet)?;
 	let statement = client.prepare(query).map_err(|db_err| { db_err.to_string() })?;
 
 	let (row_appender, schema) = map_schema_root(statement.columns(), schema_settings)?;
