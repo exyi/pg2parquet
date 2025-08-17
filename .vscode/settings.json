@@ -4,5 +4,14 @@
 	],
 	"rust-analyzer.linkedProjects": [
 		"./cli/Cargo.toml"
-	]
+	],
+	"python.testing.unittestArgs": [
+		"-v",
+		"-s",
+		"./py-tests",
+		"-p",
+		"test*.py"
+	],
+	"python.testing.pytestEnabled": false,
+	"python.testing.unittestEnabled": true
 }
