@@ -82,6 +82,7 @@ def run_sql(*commands: Union[str, sql.SQL, sql.Composed]):
 def run_pg2parquet(args: list[str]):
     r = subprocess.run([ pg2parquet_binary, *args ], env={
         "PGPASSWORD": pg2parquet_password,
+        "RUST_BACKTRACE": "1"
     }, capture_output=True)
     if r.returncode != 0:
         print(f"pg2parquet exited with code {r.returncode}. Stdout:")

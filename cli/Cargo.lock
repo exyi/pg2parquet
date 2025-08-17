@@ -968,9 +968,9 @@ dependencies = [
 
 [[package]]
 name = "parquet"
-version = "54.0.0"
+version = "54.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3334c50239d9f4951653d84fa6f636da86f53742e5e5849a30fbe852f3ff4383"
+checksum = "f88838dca3b84d41444a0341b19f347e8098a3898b0f21536654b8b799e11abd"
 dependencies = [
  "ahash",
  "base64",
@@ -1015,10 +1015,12 @@ dependencies = [
  "chrono",
  "clap",
  "eui48",
+ "half",
  "jemallocator",
  "native-tls",
  "parquet",
  "pg_bigdecimal",
+ "pgvector",
  "postgres",
  "postgres-native-tls",
  "postgres-protocol",
@@ -1037,6 +1039,17 @@ dependencies = [
  "bytes",
  "num",
  "postgres",
+]
+
+[[package]]
+name = "pgvector"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0e8871b6d7ca78348c6cd29b911b94851f3429f0cd403130ca17f26c1fb91a6"
+dependencies = [
+ "bytes",
+ "half",
+ "postgres-types",
 ]
 
 [[package]]
