@@ -47,7 +47,8 @@ Alternatively, you can export result of a SQL query
 pg2parquet export --host localhost.for.example --dbname my_database --output-file output.parquet -q 'select column_a, column_b::text from another_table'
 ```
 
-You can also use environment variables `$PGPASSWORD` and `$PGUSER`
+You can also use environment variables `$PGPASSWORD` and `$PGUSER` for credentials.
+You can use `$DATABASE_URL` variable to specify the full connection string.
 
 ## Supported types
 
@@ -69,6 +70,9 @@ You can also use environment variables `$PGPASSWORD` and `$PGUSER`
 	- Always serialized as single-dimensional arrays, and information about starting index is dropped
 * **[Composite Types](https://www.postgresql.org/docs/current/rowtypes.html)**
 	- Serialized as Parquet struct type
+* **[pgvector extension types](git@github.com:exyi/pg2parquet.git)**
+	- Dense vectors are written as parquet List
+	- Sparse vectors are written as `Map[int -> float]`
 
 ## Known Limitations (and workarounds)
 
@@ -110,6 +114,9 @@ Options:
 
       --quiet
           Avoid printing unnecessary information (schema and progress). Only errors will be written to stderr
+
+  -c, --connection <CONNECTION_STRING>
+          PostgreSQL connection URL (postgres://...) or connection string. Mutually exclusive with individual connection parameters. The connection URL may be also provided using the DATABASE_URL environment variable (recommended if it contains a password) See https://docs.rs/postgres/latest/postgres/config/struct.Config.html for a list of supported options
 
   -H, --host <HOST>
           Database server host
@@ -205,4 +212,11 @@ Options:
           - plain:                 Postgres arrays are simply stored as Parquet LIST
           - dimensions:            Postgres arrays are stored as struct of { data: List[T], dims: List[int] }
           - dimensions+lowerbound: Postgres arrays are stored as struct of { data: List[T], dims: List[int], lower_bound: List[int] }
+
+      --float16-handling <FLOAT16_HANDLING>
+          [default: float32]
+
+          Possible values:
+          - float32: Serialize float16 values as float32 for better compatibility. Usually, compression will handle this and it won't take significantly more space
+          - float16: Use Float16 parquet logical type. Currently, compatibility with other tools is limited and the implementation in pg2parquet has performance issues, but might offer a size reduction
 ```
