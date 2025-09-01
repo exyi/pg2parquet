@@ -6,17 +6,16 @@ use crate::rustutils::ArrayDeconstructor;
 
 use super::type_shenanigans::ParsedType;
 
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Expr {
     Unknown(String),
     Identifier(Option<String>, String, bool, bool), // alias, name, al. quoted, name quoted
     Column(Box<Expr>, String, bool),
-    ConstantStr(String),
-    ConstantNum(String),
-    ConstantTyped(String, String),
-    ConstantBool(bool),
-    ConstantNull,
+    ConstStr(String),
+    ConstNum(String),
+    ConstTyped(String, String),
+    ConstBool(bool),
+    ConstNull,
     TypeConversion(Box<Expr>, ParsedType),
     UnaryOp(String, Box<Expr>),
     BinaryOp(String, Box<Expr>, Box<Expr>),
@@ -27,6 +26,67 @@ pub enum Expr {
     Or(Vec<Expr>),
     Not(Box<Expr>),
     SubPlan(String),
+}
+
+impl Expr {
+    pub fn const_str<T: ToString>(value: T) -> Self {
+        Expr::ConstStr(value.to_string())
+    }
+    pub fn const_num<T: ToString>(value: T) -> Self {
+        Expr::ConstNum(value.to_string())
+    }
+    pub fn const_typed<T: ToString>(value: T, typ: &str) -> Self {
+        Expr::ConstTyped(value.to_string(), typ.to_string())
+    }
+    pub fn conv(self, typ: ParsedType) -> Self {
+        Expr::TypeConversion(self.boxed(), typ)
+    }
+    pub fn ident(str: &str) -> Self {
+        Expr::Identifier(None, str.to_string(), false, false)
+    }
+    pub fn ident_quoted(str: &str) -> Self {
+        Expr::Identifier(None, str.to_string(), true, false)
+    }
+    pub fn unary_op(self, op: &str) -> Self {
+        Expr::UnaryOp(op.to_string(), self.boxed())
+    }
+    pub fn binary_op(self, op: &str, right: Expr) -> Self {
+        Expr::BinaryOp(op.to_string(), self.boxed(), right.boxed())
+    }
+    pub fn array_index(self, indices: Vec<Expr>) -> Self {
+        Expr::ArrayIndex(self.boxed(), indices)
+    }
+    pub fn column(self, name: &str) -> Self {
+        Expr::Column(self.boxed(), name.to_string(), false)
+    }
+    pub fn column_quoted(self, name: &str) -> Self {
+        Expr::Column(self.boxed(), name.to_string(), true)
+    }
+    pub fn log_and(self, expr: Expr) -> Self {
+        match self {
+            Expr::And(mut exprs) => {
+                exprs.push(expr);
+                Expr::And(exprs)
+            },
+            _ => Expr::And(vec![self, expr])
+        }
+    }
+    pub fn log_or(self, expr: Expr) -> Self {
+        match self {
+            Expr::Or(mut exprs) => {
+                exprs.push(expr);
+                Expr::Or(exprs)
+            },
+            _ => Expr::Or(vec![self, expr])
+        }
+    }
+    fn log_not(self) -> Self {
+        Expr::Not(self.boxed())
+    }
+
+    pub fn boxed(self) -> Box<Self> {
+        Box::new(self)
+    }
 }
 
 impl Display for Expr {
@@ -52,11 +112,11 @@ impl Display for Expr {
                 write!(f, ").")?;
                 write_str(f, name, *quoted)
             },
-            Expr::ConstantStr(c) => write!(f, "'{}'", c),
-            Expr::ConstantNum(c) => write!(f, "{}", c),
-            Expr::ConstantTyped(c, t) => write!(f, "'{}'::{}", c, t),
-            Expr::ConstantBool(c) => write!(f, "{}", c),
-            Expr::ConstantNull => write!(f, "NULL"),
+            Expr::ConstStr(c) => write!(f, "'{}'", c),
+            Expr::ConstNum(c) => write!(f, "{}", c),
+            Expr::ConstTyped(c, t) => write!(f, "'{}'::{}", c, t),
+            Expr::ConstBool(c) => write!(f, "{}", c),
+            Expr::ConstNull => write!(f, "NULL"),
             Expr::TypeConversion(expr, parsed_type) => write!(f, "({})::{}", expr, parsed_type),
             Expr::UnaryOp(_, expr) => todo!(),
             Expr::BinaryOp(_, expr, expr1) => todo!(),
@@ -295,7 +355,7 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_at_tz()?;
         loop {
             match self.tk() {
-                Token::Punctuation("=" | "<>" | "<" | "<=" | ">" | ">=" | "[" | "]" | ",") => return Ok(left),
+                Token::Punctuation("=" | "<>" | "<" | "<=" | ">" | ">=" | "[" | "]" | "," | ".") => return Ok(left),
 
                 Token::Punctuation(op) => {
                     let op = (*op).to_owned();
@@ -322,7 +382,7 @@ impl<'a> Parser<'a> {
             let _guard = self.rec_guard()?;
             let Some(Token::Punctuation(op)) = self.pop() else { unreachable!() };
             match (op, self.parse_unary()?) {
-                ("-", Expr::ConstantNum(num)) => Ok(Expr::ConstantNum(format!("-{}", num))),
+                ("-", Expr::ConstNum(num)) => Ok(Expr::ConstNum(format!("-{}", num))),
                 (_, inner) => Ok(Expr::UnaryOp(op.to_owned(), Box::new(inner)))
             }
         } else {
@@ -334,6 +394,17 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_column_access()?;
         loop {
             match self.tk() {
+                &Token::Punctuation(".") => {
+                    // Allow column access after any postfix expression (index/cast/call)
+                    self.pop();
+                    let (column, quoted) = match self.pop() {
+                        Some(Token::Ident(column)) => (column.to_owned(), false),
+                        Some(Token::IdentString(column)) => (column.into_owned(), true),
+                        _ => return Err(self.make_err(format!("Expected column name after '.'")))
+                    };
+                    println!("Column access: {} {}", column, quoted);
+                    left = Expr::Column(left.boxed(), column, quoted);
+                },
                 &Token::Punctuation("[") => {
                     self.pop();
                     let mut index = Vec::new();
@@ -356,24 +427,25 @@ impl<'a> Parser<'a> {
                 },
 
                 Token::Parenthesized(_) => {
-                    
                     let Some(Token::Parenthesized(arg_tks)) = self.pop() else { unreachable!() };
                     let _guard = self.rec_guard()?;
 
-                    let mut parser2 = Parser::new(arg_tks, self.recursion_limit.clone(), self.suppress_errors);
-                    parser2.panic_errors = self.panic_errors;
                     let mut args = Vec::new();
-                    loop {
-                        args.push(parser2.parse_expr().map_err(|e| e.with_position(self.ix))?);
-                        if !parser2.match_token(&Token::Punctuation(",")) {
-                            break;
+                    if arg_tks.len() > 0 {
+                        let mut parser2 = Parser::new(arg_tks, self.recursion_limit.clone(), self.suppress_errors);
+                        parser2.panic_errors = self.panic_errors;
+                        loop {
+                            args.push(parser2.parse_expr().map_err(|e| e.with_position(self.ix))?);
+                            if !parser2.match_token(&Token::Punctuation(",")) {
+                                break;
+                            }
+                        }
+
+                        if !parser2.is_end() {
+                            return Err(parser2.make_err(format!("Expected end of argument list, got {:?}", parser2.tk())));
                         }
                     }
 
-                    if !parser2.is_end() {
-                        return Err(parser2.make_err(format!("Expected end of argument list, got {:?}", parser2.tk())));
-                    }
-                    
                     match &left {
                         Expr::Identifier(None, name, _, /* quoted */ false) =>
                             left = Expr::FunctionCall(name.to_owned(), args),
@@ -388,7 +460,7 @@ impl<'a> Parser<'a> {
     
     fn parse_type(&mut self) -> Result<ParsedType, ParseError> {
         let mut type_name = String::new();
-        while matches!(self.tk(), Token::Ident(_) | Token::IdentifierString(_)) { // TODO: separate ident string
+        while matches!(self.tk(), Token::Ident(_) | Token::IdentString(_)) { // TODO: separate ident string
             let name = self.pop().unwrap().into_text().unwrap();
             if !type_name.is_empty() { type_name.push(' '); }
             type_name.push_str(name.as_ref());
@@ -425,7 +497,7 @@ impl<'a> Parser<'a> {
             self.pop();
             let (column, quoted) = match self.pop() {
                 Some(Token::Ident(column)) => (column.to_owned(), false),
-                Some(Token::IdentifierString(column)) => (column.into_owned(), true),
+                Some(Token::IdentString(column)) => (column.into_owned(), true),
                 _ => return Err(self.make_err(format!("Expected column name after '.'")))
             };
             println!("Column access: {} {}", column, quoted);
@@ -445,11 +517,11 @@ impl<'a> Parser<'a> {
 
         match token1 {
             Token::Ident(name) => Ok(Expr::Identifier(None, name.to_owned(), false, false)),
-            Token::IdentifierString(name) => Ok(Expr::Identifier(None, name.into_owned(), false, true)),
-            Token::ConstantString(s) => Ok(Expr::ConstantStr(s.into_owned())),
-            Token::Keyword("NULL") => Ok(Expr::ConstantNull),
-            Token::Keyword("TRUE") => Ok(Expr::ConstantBool(true)),
-            Token::Keyword("FALSE") => Ok(Expr::ConstantBool(false)),
+            Token::IdentString(name) => Ok(Expr::Identifier(None, name.into_owned(), false, true)),
+            Token::ConstString(s) => Ok(Expr::ConstStr(s.into_owned())),
+            Token::Keyword("NULL") => Ok(Expr::ConstNull),
+            Token::Keyword("TRUE") => Ok(Expr::ConstBool(true)),
+            Token::Keyword("FALSE") => Ok(Expr::ConstBool(false)),
             Token::Number(num) => {
                 let mut num = num.to_owned();
                 if matches!(self.tk(), Token::Punctuation(".")) {
@@ -460,7 +532,7 @@ impl<'a> Parser<'a> {
                     num.push('.');
                     num.push_str(fractional);
                 }
-                Ok(Expr::ConstantNum(num.to_owned()))
+                Ok(Expr::ConstNum(num.to_owned()))
             },
             Token::Parenthesized(inner) => {
                 let _guard = self.rec_guard()?;
@@ -489,7 +561,7 @@ fn is_identifier_str(s: &str) -> bool {
 }
 
 fn is_identifier(t: &Token) -> bool {
-    matches!(t, Token::Ident(_) | Token::IdentifierString(_))
+    matches!(t, Token::Ident(_) | Token::IdentString(_))
 }
 
 fn pass_recursive<'a>(mut tokens: Vec<Token<'a>>, pass: &impl Fn(Vec<Token<'a>>) -> Vec<Token<'a>>) -> Vec<Token<'a>> {
@@ -517,208 +589,10 @@ fn pass_remove_ws<'a>(tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
     tokens.into_iter().filter(|t| !matches!(t, Token::Space)).collect()
 }
 
-fn pass_keyword_values<'a>(tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
-    tokens.into_iter().map(|t| match t {
-        Token::Ident("null" | "NULL") => t.replace_with(Expr::ConstantNull),
-        Token::Ident("true" | "TRUE") => t.replace_with(Expr::ConstantBool(true)),
-        Token::Ident("false" | "FALSE") => t.replace_with(Expr::ConstantBool(false)),
-        _ => t
-    }).collect()
-}
-
-fn pass_parse_type_names<'a>(mut tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
-    let mut result = Vec::new();
-    tokens.reverse();
-
-    loop {
-        match tokens.pop() {
-            None => break,
-            Some(tk @ Token::Punctuation("::")) => {
-                result.push(tk);
-                // Type conversion - type name follows. The syntax is:
-                // ::something something(a, b, c)
-
-                let mut type_name = String::new();
-                while matches!(tokens.last(), Some(Token::Ident(_) | Token::IdentifierString(_))) {
-                    let name = tokens.pop().unwrap().into_text().unwrap();
-                    if !type_name.is_empty() { type_name.push(' '); }
-                    type_name.push_str(name.as_ref());
-                }
-
-                let t = if matches!(tokens.last(), Some(Token::Parenthesized(_))) {
-                    let argtokens = match tokens.pop() { Some(Token::Parenthesized(args)) => args, _ => unreachable!() };
-                    let args: Vec<_> = argtokens.split(|t| matches!(t, Token::Punctuation(","))).collect();
-                    let args_str = args.into_iter().map(|a| a.into_iter().map(|t| format!("{}", t)).collect::<Vec<_>>().join(" ")).collect::<Vec<String>>();
-
-                    ParsedType::from_name_args(type_name, &args_str.iter().map(|a| a.as_str()).collect::<Vec<&str>>(), None)
-                } else {
-                    ParsedType::from_name_args(type_name, &[], None)
-                };
-
-                if matches!(tokens.last(), Some(Token::Punctuation("["))) {
-                    // array
-                    if matches!(tokens.get(tokens.len() - 2), Some(Token::Punctuation("]"))) {
-                        let _ = tokens.pop();
-                        let _ = tokens.pop();
-                        result.push(Token::TypeName(ParsedType::Array(None, Box::new(t))));
-                    } else {
-                        debug_assert!(false);
-                        result.push(Token::TypeName(t));
-                    }
-                } else {
-                    result.push(Token::TypeName(t));
-                }
-            },
-
-            Some(tk) => result.push(tk)
-
-        }
-    }
-
-    result
-}
-
-fn pass_contract_identifiers_and_constants<'a>(mut tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
-    let mut result = vec![];
-    let mut i = 0;
-    while i < tokens.len() {
-        match &tokens[i..] {
-            [ alias @ (Token::Ident(_) | Token::IdentifierString(_)), Token::Punctuation("."), name @ (Token::Ident(_) | Token::IdentifierString(_)), .. ] => {
-                let (alias_n, alias_q) = match alias {
-                    Token::Ident(s) => ((*s).to_owned(), false),
-                    Token::IdentifierString(s) => (s.as_ref().to_owned(), true),
-                    _ => unreachable!()
-                };
-                let (name_n, name_q) = match name {
-                    Token::Ident(s) => ((*s).to_owned(), false),
-                    Token::IdentifierString(s) => (s.as_ref().to_owned(), true),
-                    _ => unreachable!()
-                };
-                result.push(Token::ParsedExpr(Expr::Identifier(Some(alias_n), name_n, alias_q, name_q), tokens[i..i+3].to_vec()));
-                i += 3;
-            },
-
-            [ Token::Punctuation("-"), Token::Number(whole), Token::Punctuation("."), Token::Number(fractional), .. ] => {
-                result.push(Token::ParsedExpr(Expr::ConstantNum(format!("-{}.{}", whole, fractional)), tokens[i..i+4].to_vec()));
-                i += 4;
-            }
-
-            [ Token::Number(whole), Token::Punctuation("."), Token::Number(fractional), .. ] => {
-                result.push(Token::ParsedExpr(Expr::ConstantNum(format!("{}.{}", whole, fractional)), tokens[i..i+3].to_vec()));
-                i += 3;
-            }
-
-            [ Token::Punctuation("-"), Token::Number(whole), .. ] => {
-                result.push(Token::ParsedExpr(Expr::ConstantNum(format!("{}", whole)), tokens[i..i+2].to_vec()));
-                i += 2;
-            }
-
-            [ tk @ Token::Number(num), .. ] => {
-                result.push(tk.clone().replace_with(Expr::ConstantNum((*num).to_owned())));
-                i += 1;
-            },
-
-            [ tk @ Token::Ident(name_n), .. ] => {
-                result.push(tk.clone().replace_with(Expr::Identifier(None, (*name_n).to_owned(), false, false)));
-                i += 1;
-            },
-
-            [ tk @ Token::ConstantString(name_n), .. ] => {
-                result.push(tk.clone().replace_with(Expr::ConstantStr(name_n.as_ref().to_owned())));
-                i += 1;
-            },
-
-            [ tk @ Token::IdentifierString(name_n), .. ] => {
-                result.push(tk.clone().replace_with(Expr::Identifier(None, name_n.as_ref().to_owned(), true, true)));
-                i += 1;
-            },
-
-            [ _, .. ] => {
-                result.push(std::mem::replace(&mut tokens[i], Token::Space));
-                i += 1;
-            }
-            [] => unreachable!()
-        }
-    }
-    result
-}
-
-fn pass_named_plans<'a>(tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
-    match &tokens[..] {
-        [ Token::Ident(sp @ ("SubPlan" | "InitPlan")), Token::Ident(num) | Token::Number(num) ] =>
-            vec![Token::ParsedExpr(Expr::SubPlan(format!("{} {}", sp, num)), tokens)],
-        _ => tokens
-    }
-}
-
-fn pass_contract_column_access<'a>(mut tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
-    tokens.reverse();
-    let mut result = vec![];
-    while tokens.len() > 0 {
-        match (tokens.pop().unwrap(), &tokens[..]) {
-            (Token::ParsedExpr(expr, _), [ .., Token::Ident(column), Token::Punctuation(".") ] ) => {
-                result.push(Token::ParsedExpr(Expr::Column(Box::new(expr), (*column).to_owned(), false), vec![]));
-                tokens.pop();
-                tokens.pop();
-            },
-
-            (Token::ParsedExpr(expr, _), [ .., Token::IdentifierString(column), Token::Punctuation(".") ] ) => {
-                result.push(Token::ParsedExpr(Expr::Column(Box::new(expr), column.as_ref().to_owned(), false), vec![]));
-                tokens.pop();
-                tokens.pop();
-            },
-
-            (tk, _) => {
-                result.push(tk);
-            }
-        }
-    }
-    result
-}
-
-// fn pass_prefix_ops<'a>(mut tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
-// 	tokens.reverse();
-// 	let mut result = vec![];
-// 	loop {
-// 		match &tokens[..] {
-// 			[] => break,
-// 			[ .., Token::ParsedExpr(_, _), Token::Punctuation(_) ] => {
-// 				let (Token::Punctuation(operator), Token::ParsedExpr(expr, _)) = (tokens.pop().unwrap(), tokens.pop().unwrap()) else { unreachable!(); };
-
-// 				result.push(Token::ParsedExpr(Expr::UnaryOp(operator.to_owned(), Box::new(expr)), vec![]));
-// 			},
-
-// 			[ .., Token::ParsedExpr(_, )
-// 			[ .., _ ] => result.push(tokens.pop().unwrap())
-            
-// 		}
-// 	}
-// 	result
-// }
-
-
-fn pass_singular_ops<'a>(mut tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
-    match &tokens[..] {
-        [ Token::ParsedExpr(_, _), Token::Punctuation(_), Token::ParsedExpr(_, _) ] => {
-            let Token::ParsedExpr(rhs, _) = tokens.pop().unwrap() else { unreachable!(); };
-            let Token::Punctuation(op) = tokens.pop().unwrap() else { unreachable!(); };
-            let Token::ParsedExpr(lhs, _) = tokens.pop().unwrap() else { unreachable!(); };
-
-            vec![Token::ParsedExpr(Expr::BinaryOp(op.to_owned(), Box::new(lhs), Box::new(rhs)), vec![])]
-        },
-        [ Token::Punctuation(_), Token::ParsedExpr(_, _) ] => {
-            let Token::ParsedExpr(operand, _) = tokens.pop().unwrap() else { unreachable!(); };
-            let Token::Punctuation(op) = tokens.pop().unwrap() else { unreachable!() };
-            vec![Token::ParsedExpr(Expr::UnaryOp(op.to_owned(), Box::new(operand)), vec![])]
-        },
-        _ => tokens
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Token<'a> {
-    ConstantString(Cow<'a, str>),
-    IdentifierString(Cow<'a, str>),
+    ConstString(Cow<'a, str>),
+    IdentString(Cow<'a, str>),
     Parenthesized(Vec<Token<'a>>),
     Punctuation(&'a str),
     Ident(&'a str),
@@ -732,8 +606,8 @@ pub enum Token<'a> {
 impl<'a> fmt::Display for Token<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Token::ConstantString(c) => write!(f, "'{}'", c.replace('\'', "''")),
-            Token::IdentifierString(c) => write!(f, "\"{}\"", c.replace('"', "\"\"")),
+            Token::ConstString(c) => write!(f, "'{}'", c.replace('\'', "''")),
+            Token::IdentString(c) => write!(f, "\"{}\"", c.replace('"', "\"\"")),
             Token::Parenthesized(inner) => {
                 write!(f, "(")?;
                 for (i, t) in inner.iter().enumerate() {
@@ -745,11 +619,8 @@ impl<'a> fmt::Display for Token<'a> {
             Token::Punctuation(c) => write!(f, "{}", c),
             Token::Ident(c) | Token::Keyword(c) | Token::Number(c) => write!(f, "{}", c),
             Token::Space => write!(f, " "),
-            Token::ParsedExpr(_e, orig_tokens) => {
-                for (i, t) in orig_tokens.iter().enumerate() {
-                    if i > 0 { write!(f, " ")? }
-                    write!(f, "{}", t)?;
-                }
+            Token::ParsedExpr(_e, _) => {
+                write!(f, "EXPR{{ {} }}", _e)?;
                 Ok(())
             },
             Token::TypeName(t) =>
@@ -764,7 +635,7 @@ impl<'a> Token<'a> {
     }
     pub fn into_text(self) -> Option<Cow<'a, str>> {
         match self {
-            Token::ConstantString(s) | Token::IdentifierString(s) => Some(s),
+            Token::ConstString(s) | Token::IdentString(s) => Some(s),
             Token::Punctuation(s) | Token::Ident(s) | Token::Number(s) => Some(Cow::Borrowed(s)),
             _ => None
         }
@@ -772,7 +643,7 @@ impl<'a> Token<'a> {
 
     pub fn ref_text<'b: 'a>(&'b self) -> Option<&'a str> {
         match self {
-            Token::ConstantString(s) | Token::IdentifierString(s) => Some(s),
+            Token::ConstString(s) | Token::IdentString(s) => Some(s),
             Token::Punctuation(s) | Token::Ident(s) | Token::Number(s) => Some(*s),
             _ => None
         }
@@ -793,9 +664,9 @@ pub fn tokenize_expr<'a>(expr: &'a str) -> Result<(Vec<Token<'a>>, usize), Strin
                 let value = read_string(&expr, &mut ix)?;
                 assert_eq!(expr.as_bytes()[ix - 1] as char, char);
                 tokens.push(if char == '"' {
-                    Token::IdentifierString(value)
+                    Token::IdentString(value)
                 } else {
-                    Token::ConstantString(value)
+                    Token::ConstString(value)
                 });
             },
             '(' => {
@@ -834,7 +705,7 @@ pub fn tokenize_expr<'a>(expr: &'a str) -> Result<(Vec<Token<'a>>, usize), Strin
     }
 
     fn is_reserved_keyword(lit: &str) -> bool {
-        matches!(lit.to_ascii_uppercase().as_ref(), "IS" | "NOT" | "NULL" | "TRUE" | "FALSE" | "AND" | "AS" | "ARRAY" | "SOME" | "ANY" | "WHEN" | "THEN")
+        matches!(lit.to_ascii_uppercase().as_ref(), "IS" | "NOT" | "NULL" | "TRUE" | "FALSE" | "AND" | "OR" | "UNKNOWN" | "AS" | "ARRAY" | "SOME" | "ANY" | "WHEN" | "THEN")
     }
 
     fn skip_ws(expr: &str, ix: &mut usize, tokens: &mut Vec<Token>) {
@@ -972,30 +843,203 @@ fn case_ab() -> Expr { Expr::Identifier(Some("a".to_owned()), "b".to_owned(), fa
 #[test] fn test_parse_col_q() { assert_eq!(parse_expr("tasks_1.\"required_checkpoints\""), Ok(Expr::Identifier(Some("tasks_1".to_owned()), "required_checkpoints".to_owned(), false, true))); }
 #[test] fn test_parse_plus() {
     assert_eq!(parse_expr("a.b"), Ok(case_ab()));
-    assert_eq!(parse_expr("a.b +    1"), Ok(Expr::BinaryOp("+".to_owned(), Box::new(case_ab()), Box::new(Expr::ConstantNum("1".to_owned())))));
+    assert_eq!(parse_expr("a.b +    1"), Ok(Expr::BinaryOp("+".to_owned(), Box::new(case_ab()), Box::new(Expr::ConstNum("1".to_owned())))));
 }
 #[test] fn test_parse_subplan() {
-    assert_eq!(parse_expr("(a.b = (InitPlan 2).col1)"), Ok(Expr::BinaryOp("=".to_owned(), Box::new(case_ab()), Box::new(Expr::Column(Box::new(Expr::SubPlan("InitPlan 2".to_owned())), "col1".to_owned(), false)))));
-    assert_eq!(parse_expr("(a.b = (SubPlan 2).col1)"), Ok(Expr::BinaryOp("=".to_owned(), Box::new(case_ab()), Box::new(Expr::Column(Box::new(Expr::SubPlan("SubPlan 2".to_owned())), "col1".to_owned(), false)))));
+    let initplan = ||Expr::SubPlan("InitPlan 2".to_owned());
+    let subplan = ||Expr::SubPlan("SubPlan 2".to_owned());
+    assert_eq!(parse_expr("(a.b = (InitPlan 2).col1)"), Ok(case_ab().binary_op("=", initplan().column("col1"))));
+    assert_eq!(parse_expr("(a.b = (SubPlan 2).col1)"), Ok(case_ab().binary_op("=", subplan().column("col1"))));
+    assert_eq!(parse_expr("(a.b = (SubPlan 2).\"cOL1\")"), Ok(case_ab().binary_op("=", subplan().column_quoted("cOL1"))));
 }
-#[test] fn test_parse_string() { assert_eq!(parse_expr("'ah''oj'"), Ok(Expr::ConstantStr("ah'oj".to_owned()))); }
+#[test] fn test_parse_string() { assert_eq!(parse_expr("'ah''oj'"), Ok(Expr::const_str("ah'oj"))); }
 #[test] fn test_parse_num() {
-    assert_eq!(parse_expr("1.2"), Ok(Expr::ConstantNum("1.2".to_owned())));
-    assert_eq!(parse_expr("100000000000000000010101"), Ok(Expr::ConstantNum("100000000000000000010101".to_owned())));
-    assert_eq!(parse_expr("-0.34"), Ok(Expr::ConstantNum("-0.34".to_owned())));
+    assert_eq!(parse_expr("1.2"), Ok(Expr::const_num(1.2)));
+    assert_eq!(parse_expr("100000000000000000010101"), Ok(Expr::const_num("100000000000000000010101")));
+    assert_eq!(parse_expr("-0.34"), Ok(Expr::const_num(-0.34)));
 }
 
-#[test] fn test_call_index_convert() {
-    println!("{:?}", tokenize_expr("fn(1,2,'3')[123.4,12]::text::numeric"));
-    assert_eq!(parse_expr("fn(1,2,'3')[123.4,12]::text::numeric"), Ok(Expr::TypeConversion(
-        Box::new(Expr::TypeConversion(
-            Box::new(Expr::ArrayIndex(
-                Box::new(Expr::FunctionCall("fn".to_owned(), vec![Expr::ConstantNum("1".to_owned()), Expr::ConstantNum("2".to_owned()), Expr::ConstantStr("3".to_owned())])),
-                vec![Expr::ConstantNum("123.4".to_owned()), Expr::ConstantNum("12".to_owned())]
-            )),
-            ParsedType::from_name_args("text".to_owned(), &[], None))),
-        ParsedType::from_name_args("numeric".to_owned(), &[], None)
-    )));
+#[test]
+fn test_call_index_convert() {
+    assert_eq!(parse_expr("fn(1,2,'3')[123.4,12]::text::numeric"), Ok(
+        Expr::FunctionCall("fn".to_owned(), vec![Expr::const_num(1), Expr::const_num(2), Expr::ConstStr("3".to_owned())])
+            .array_index(vec![Expr::const_num(123.4), Expr::const_num(12)])
+            .conv(ParsedType::from_name_args("text".to_owned(), &[], None))
+            .conv(ParsedType::from_name_args("numeric".to_owned(), &[], None))
+    ));
 }
 
+#[test]
+fn test_not_true() {
+    assert_eq!(parse_expr("NOT TRUE"), Ok(Expr::ConstBool(true).log_not()));
+    assert_eq!(parse_expr("NOT (TRUE)"), Ok(Expr::ConstBool(true).log_not()));
+}
+
+#[test]
+fn test_paren_and_binops() {
+    assert_eq!(
+        parse_expr("(1 + 2) * 3"),
+        Ok(Expr::const_num(1).binary_op("+", Expr::const_num(2)) .binary_op("*", Expr::const_num(3))));
+    assert_eq!(
+        parse_expr("1 + -2"),
+        Ok(Expr::const_num(1).binary_op("+", Expr::const_num(-2))));
+}
+
+#[test]
+fn test_compare_columns() {
+    let left = Expr::Identifier(Some("a".to_owned()), "b".to_owned(), false, false);
+    let right = Expr::Identifier(Some("c".to_owned()), "d".to_owned(), false, false);
+    assert_eq!(parse_expr("a.b = c.d"), Ok(left.binary_op("=", right)));
+}
+
+#[test]
+fn test_quoted_identifiers_both_sides() {
+    assert_eq!(
+        parse_expr("\"A\".\"B\""),
+        Ok(Expr::Identifier(Some("A".to_owned()), "B".to_owned(), true, true))
+    );
+    assert_eq!(
+        parse_expr("a.\"b.c\""),
+        Ok(Expr::Identifier(Some("a".to_owned()), "b.c".to_owned(), false, true))
+    );
+}
+
+#[test]
+fn test_function_with_column_and_const_args() {
+    assert_eq!(
+        parse_expr("fn(a.b, 2)"),
+        Ok(Expr::FunctionCall(
+            "fn".to_owned(),
+            vec![case_ab(), Expr::ConstNum("2".to_owned())]
+        ))
+    );
+}
+
+#[test]
+fn test_cast_chain_on_ident() {
+    let int4 = ParsedType::from_name_args("int4".to_owned(), &[], None);
+    let text = ParsedType::from_name_args("text".to_owned(), &[], None);
+    assert_eq!(parse_expr("a::int4::text"), Ok(Expr::ident("a").conv(int4).conv(text)));
+}
+
+#[test]
+fn test_cast_after_identifier_chain() {
+    assert_eq!(parse_expr("a.b::text"), Ok(case_ab().conv(ParsedType::from_name_args("text".to_owned(), &[], None))));
+}
+
+#[test]
+fn test_parenthesized_column_then_access() {
+    assert_eq!(parse_expr("(a.b).c"), Ok(case_ab().column("c")));
+}
+
+#[test]
+fn test_and_only_expression() {
+    assert_eq!(
+        parse_expr("a.b = 1 AND NOT FALSE"),
+        Ok(case_ab().binary_op("=", Expr::const_num(1)).log_and(Expr::ConstBool(false).log_not()))
+    );
+}
+
+#[test]
+fn test_true_is_true() {
+    assert_eq!(parse_expr("TRUE IS TRUE"), Ok(Expr::ConstBool(true).unary_op("IS TRUE")));
+    assert_eq!(parse_expr("TRUE IS NOT TRUE"), Ok(Expr::ConstBool(true).unary_op("IS TRUE").log_not()));
+}
+
+#[test]
+fn test_array_index_with_exprs() {
+    assert_eq!(
+        parse_expr("arr[1+2, (3)]"),
+        Ok(Expr::ident("arr").array_index(vec![
+            Expr::const_num(1) .binary_op("+", Expr::const_num(2)),
+            Expr::const_num(3)
+        ]))
+    );
+}
+
+#[test]
+fn test_nested_parens_true() {
+    assert_eq!(parse_expr("((TRUE))"), Ok(Expr::ConstBool(true)));
+}
+
+#[test]
+fn test_zero_arg_function_call_should_parse() {
+    assert_eq!(parse_expr("fn()"), Ok(Expr::FunctionCall("fn".to_owned(), vec![])));
+}
+
+// #[test]
+// fn test_quoted_function_name_should_parse() {
+//     assert_eq!(
+//         parse_expr("\"f N\"(1)"),
+//         Ok(Expr::FunctionCall("f N".to_owned(), vec![Expr::ConstNum("1".to_owned())]))
+//     );
+// }
+
+// #[test]
+// fn test_schema_qualified_function_call_should_parse() {
+//     assert_eq!(
+//         parse_expr("schema.fn(1)"),
+//         Ok(Expr::FunctionCall("schema.fn".to_owned(), vec![Expr::ConstNum("1".to_owned())]))
+//     );
+// }
+
+#[test]
+fn test_array_index_then_column_access() {
+    assert_eq!(parse_expr("arr[1].b"), Ok(Expr::ident("arr").array_index(vec![Expr::const_num(1)]).column("b")));
+}
+
+#[test]
+fn test_like_operator() {
+    assert_eq!(parse_expr("a ~~ 'x%'"), Ok(Expr::ident("a").binary_op("~~", Expr::const_str("x%"))));
+}
+
+#[test]
+fn test_logical_ops() {
+    // NOT binds tighter than AND; AND binds tighter than OR
+    assert_eq!(
+        parse_expr("NOT TRUE AND FALSE"),
+        Ok(Expr::ConstBool(true).log_not().log_and(Expr::ConstBool(false)))
+    );
+    assert_eq!(
+        parse_expr("TRUE OR FALSE AND FALSE"),
+        Ok(Expr::Or(vec![
+            Expr::ConstBool(true),
+            Expr::And(vec![Expr::ConstBool(false), Expr::ConstBool(false)])
+        ]))
+    );
+}
+
+#[test]
+fn test_is_and_is_not() {
+    assert_eq!(parse_expr("a.b IS NULL"), Ok(Expr::UnaryOp("IS NULL".to_owned(), Box::new(case_ab()))));
+    assert_eq!(parse_expr("a.b IS NOT FALSE"), Ok(case_ab().unary_op("IS FALSE").log_not()));
+    assert_eq!(parse_expr("a.b IS UNKNOWN"), Ok(case_ab().unary_op("IS UNKNOWN")));
+}
+
+#[test]
+fn test_comparisons() {
+    assert_eq!(parse_expr("1 <= 2"), Ok(Expr::const_num(1).binary_op("<=", Expr::const_num(2))));
+    assert_eq!(parse_expr("3 <> 4"), Ok(Expr::const_num(3).binary_op("<>", Expr::const_num(4))));
+}
+
+#[test]
+fn test_casts_parametric_and_array() {
+    let varchar5 = ParsedType::from_name_args("varchar".to_owned(), &["5"], None);
+    assert_eq!(parse_expr("'x'::varchar(5)"), Ok(Expr::const_str("x").conv(varchar5)));
+
+    let text_plain = ParsedType::from_name_args("text".to_owned(), &[], None);
+    let text_array = ParsedType::Array(None, Box::new(text_plain));
+    assert_eq!(parse_expr("'x'::text[]"), Ok(Expr::const_str("x").conv(text_array)));
+
+    let varchar5_plain = ParsedType::from_name_args("character varying".to_owned(), &["5"], None);
+    let varchar5_array = ParsedType::Array(None, Box::new(varchar5_plain));
+    assert_eq!(parse_expr("'x'::character varying(5)[]"), Ok(Expr::const_str("x").conv(varchar5_array)));
+}
+
+#[test]
+fn test_array_index_and_nested_column() {
+    assert_eq!(parse_expr("arr[1, 2]"), Ok(Expr::ident("arr").array_index(vec![Expr::const_num(1), Expr::const_num(2)])));
+
+    assert_eq!(parse_expr("a.b.c"), Ok(case_ab().column("c")));
+    assert_eq!(parse_expr("a.b.\"c d\""), Ok(case_ab().column_quoted("c d")));
 }

@@ -259,9 +259,9 @@ fn resolve_expr_type<'a>(
             Ok(OutputTypeInformation::from(column))
         },
         Expr::Unknown(expr) => Err(format!("Unknown expression: {}", expr)),
-        Expr::ConstantNull => Ok(OutputTypeInformation::null()),
-        Expr::ConstantBool(bool) => Ok(OutputTypeInformation::constant_pgtype(PgType::BOOL, Some(bool.to_string()))),
-        Expr::ConstantNum(n) => Ok(if let Ok(int) = n.parse::<i32>() {
+        Expr::ConstNull => Ok(OutputTypeInformation::null()),
+        Expr::ConstBool(bool) => Ok(OutputTypeInformation::constant_pgtype(PgType::BOOL, Some(bool.to_string()))),
+        Expr::ConstNum(n) => Ok(if let Ok(int) = n.parse::<i32>() {
             OutputTypeInformation::constant_pgtype(PgType::INT4, Some(int.to_string()))
         } else if let Ok(bigint) = n.parse::<i64>() {
             OutputTypeInformation::constant_pgtype(PgType::INT8, Some(bigint.to_string()))
@@ -276,7 +276,7 @@ fn resolve_expr_type<'a>(
                 Some(n.to_string())
             )
         }),
-        Expr::ConstantStr(s) => Ok(OutputTypeInformation::constant_type(Some(PgType::TEXT.oid()), s.len() as i32, ParsedType::Char(s.len() as u32), Some(s.to_owned()))),
+        Expr::ConstStr(s) => Ok(OutputTypeInformation::constant_type(Some(PgType::TEXT.oid()), s.len() as i32, ParsedType::Char(s.len() as u32), Some(s.to_owned()))),
         Expr::And(exprs) | Expr::Or(exprs) => {
             let nullable =
                 exprs.iter()
@@ -488,7 +488,7 @@ fn resolve_expr_type<'a>(
             }
         },
         Expr::ArrayIndex(_, _) => todo!(),
-        Expr::ConstantTyped(_, _) => todo!(),
+        Expr::ConstTyped(_, _) => todo!(),
         Expr::Column(_, _, _) => todo!(),
         // _ => Err(format!("Unknown expression"))
     }
