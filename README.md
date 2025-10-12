@@ -142,7 +142,13 @@ Options:
           - require: Require the use of TLS
 
       --ssl-root-cert <SSL_ROOT_CERT>
-          File with a TLS root certificate in PEM or DER (.crt) format. When specified, the default CA certificates are considered untrusted. The option can be specified multiple times. Using this options implies --sslmode=require
+          File with a TLS root certificate in PEM or DER (.crt) format. When specified, the default CA certificates are considered untrusted. The option can be specified multiple times. The option implies --sslmode=require
+
+      --ssl-client-cert <SSL_CLIENT_CERT>
+          File with a TLS client certificate in PEM format. Note that you also need to use the ssl-client-key option
+
+      --ssl-client-key <SSL_CLIENT_KEY>
+          File with a TLS client key in PEM format
 
       --macaddr-handling <MACADDR_HANDLING>
           How to handle `macaddr` columns
