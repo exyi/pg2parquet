@@ -9,7 +9,9 @@ name = "pg2parquet"
 version = "0.2.1"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = []
+manpage_gen = [ "dep:clap_mangen", "dep:clap_complete_nushell", "dep:clap_complete" ]
 
 [dependencies]
 parquet = { version = "54.2.1", default-features = false, features = ["zstd", "lz4", "flate2", "brotli", "snap", "base64"] }
@@ -27,6 +29,10 @@ bytes = "1.9.0"
 postgres-protocol = "0.6.7"
 byteorder = "1.5.0"
 rpassword = "7.3.1"
+# optional:
+clap_mangen = { version = "0.2.29", optional = true }
+clap_complete = { version = "4.5.58", optional = true }
+clap_complete_nushell = { version = "4.5.8", optional = true }
 
 [target.'cfg(not(any(target_family = "windows", target_arch = "riscv64")))'.dependencies]
 jemallocator = "0.5.4"

@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use std::{sync::Arc, path::PathBuf, process};
 
-use clap::{Parser, ValueEnum, Command};
+use clap::{Command, CommandFactory, Parser, ValueEnum};
 use parquet::{basic::{ZstdLevel, BrotliLevel, GzipLevel, Compression}, file::properties::DEFAULT_WRITE_BATCH_SIZE};
 use postgres_cloner::{SchemaSettingsArrayHandling, SchemaSettingsEnumHandling, SchemaSettingsFloat16Handling, SchemaSettingsIntervalHandling, SchemaSettingsJsonHandling, SchemaSettingsMacaddrHandling, SchemaSettingsNumericHandling};
 
@@ -37,6 +37,9 @@ enum CliCommand {
     ParquetInfo(ParquetInfoArgs),
     #[command(arg_required_else_help = true, hide = true)]
     PlaygroundCreateSomething(PlaygroundCreateSomethingArgs),
+    #[command(arg_required_else_help = true, hide = true)]
+    #[cfg(feature = "manpage_gen")]
+    ManpageGen(ManpageGenArgs),
     /// Exports a PostgreSQL table or query to a Parquet file
     #[command(arg_required_else_help = true)]
     Export(ExportArgs)
@@ -185,6 +188,15 @@ pub struct SchemaSettingsArgs {
 enum ParquetCompression { None, Snappy, Gzip, Lzo, Brotli, Lz4, Zstd }
 
 #[derive(clap::Args, Debug, Clone)]
+#[cfg(feature = "manpage_gen")]
+struct ManpageGenArgs {
+    #[arg(long)]
+    out_manpage: Option<PathBuf>,
+    #[arg(long)]
+    out_completion: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug, Clone)]
 // #[command(author, version, about, long_about = None)]
 struct ParquetInfoArgs {
     parquet_file: PathBuf,
@@ -325,6 +337,43 @@ fn main() {
         },
         CliCommand::Export(args) => {
             perform_export(args);
+        }
+        #[cfg(feature = "manpage_gen")]
+        CliCommand::ManpageGen(args) => {
+            let mut cmd = CliCommand::command();
+            // {
+            //     let x = cmd.find_subcommand_mut("pg2parquet-help").unwrap();
+            //     *x = x.clone().hide(true);
+            // }
+            cmd.build(); // prepends `pg2parquet-` to subcommands
+            if let Some(out_dir) = args.out_manpage {
+                let man = clap_mangen::Man::new(cmd.clone());
+                let mut buffer = Vec::new();
+                man.render(&mut buffer).unwrap();
+
+                let man_export = clap_mangen::Man::new(cmd.get_subcommands().find(|c| c.get_name() == "export").unwrap().clone());
+                man_export.render(&mut buffer).unwrap();
+
+                std::fs::write(out_dir.join(&format!("{}.1", cmd.get_name())), buffer).unwrap();
+
+                for cmd_ref in cmd.get_subcommands().filter(|c| !c.is_hide_set()) {
+                    let cmd = cmd_ref.clone();
+                    let man = clap_mangen::Man::new(cmd);
+                    let mut buffer = Vec::new();
+                    man.render(&mut buffer).unwrap();
+                    std::fs::write(out_dir.join(&format!("pg2parquet-{}.1", cmd_ref.get_name())), buffer).unwrap();
+                }
+            }
+
+            if let Some(out_dir) = args.out_completion {
+                let name = "pg2parquet";
+                let file = |name: &str| std::fs::File::create(out_dir.join(name)).unwrap();
+                clap_complete::generate(clap_complete::shells::Bash, &mut cmd, name, &mut file("complete.bash"));
+                clap_complete::generate(clap_complete::shells::Zsh, &mut cmd, name, &mut file("complete.zsh"));
+                clap_complete::generate(clap_complete::shells::Elvish, &mut cmd, name, &mut file("complete.elv"));
+                clap_complete::generate(clap_complete::shells::Fish, &mut cmd, name, &mut file("complete.fish"));
+                clap_complete::generate(clap_complete_nushell::Nushell, &mut cmd, name, &mut file("complete.nu"));
+            }
         }
     }
 }

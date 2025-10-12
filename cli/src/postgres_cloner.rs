@@ -211,7 +211,7 @@ fn use_env_var(name: &str, label: &str, quiet: bool) -> Option<String> {
 	}
 }
 
-fn process_connection_string_parse_error(args: &PostgresConnArgs, conn_str: &str, e: postgres::Error) -> String {
+fn process_connection_string_parse_error(_args: &PostgresConnArgs, conn_str: &str, e: postgres::Error) -> String {
 	let mut help = String::new();
 	if conn_str.contains("sslrootcert=") || conn_str.contains("sslcert=") || conn_str.contains("sslkey=") {
 		help += "\nThe sslrootcert, sslcert and sslkey options are not supported in the connection string. You can use --ssl-root-cert, --ssl-client-cert, --ssl-client-key CLI options instead to configure the TLS connection.";
@@ -795,7 +795,7 @@ fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> 
 	(Box::new(cp), arr_t)
 }
 
-fn build_primitive_pq_type(name: &str, data_type: parquet::basic::Type, length: Option<i32>, logical_type: Option<LogicalType>, conv_type: Option<ConvertedType>) -> PrimitiveTypeBuilder {
+fn build_primitive_pq_type(name: &'_ str, data_type: parquet::basic::Type, length: Option<i32>, logical_type: Option<LogicalType>, conv_type: Option<ConvertedType>) -> PrimitiveTypeBuilder<'_> {
 	let mut t =
 		ParquetType::primitive_type_builder(name, data_type)
 			.with_converted_type(conv_type.unwrap_or(ConvertedType::NONE));
