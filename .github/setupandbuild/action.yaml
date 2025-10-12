@@ -9,6 +9,9 @@ inputs:
     description: Cargo Profile to use
     default: ci-build
     required: true
+  rust_features:
+    description: Cargo features to compile
+    default: default
 runs:
   using: composite
   steps:
@@ -23,7 +26,7 @@ runs:
     with:
       use-cross: ${{ runner.os != 'Windows' && (inputs.rust_target == 'x86_64-unknown-linux-musl' || inputs.rust_target == 'x86_64-pc-windows-gnu' || inputs.rust_target == 'aarch64-unknown-linux-gnu' || inputs.rust_target == 'riscv64gc-unknown-linux-gnu') }}
       command: build
-      args: --locked --profile=${{ inputs.rust_profile }} --manifest-path=cli/Cargo.toml --target=${{ inputs.rust_target }}
+      args: --locked --profile=${{ inputs.rust_profile }} --manifest-path=cli/Cargo.toml --target=${{ inputs.rust_target }} --features=${{ inputs.rust_features }}
   - name: Copy binary
     if: inputs.rust_target != 'x86_64-pc-windows-gnu'
     shell: bash

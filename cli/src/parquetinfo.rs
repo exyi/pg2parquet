@@ -9,7 +9,7 @@ use std::fmt::{Display, Debug, Formatter};
 
 // Internal debugging tool: prints metadata and content of parquet file in text-form
 
-fn print_col_info<T: DataType<T = T2>, T2: Default + Clone + ParquetTypeFormat>(col_name: &str, col: &ColumnDescriptor, reader: &mut ColumnReaderImpl<T>) {
+fn print_col_info<T: DataType<T = T2>, T2: Default + Clone + ParquetTypeFormat>(_col_name: &str, col: &ColumnDescriptor, reader: &mut ColumnReaderImpl<T>) {
 	let batch_size = 300;
 	let mut data: Vec<T2> = vec![];
 	let mut dls = vec![];
