@@ -6,7 +6,7 @@ readme = "../README.md"
 keywords = ["cli", "postgres", "parquet"]
 documentation = "https://github.com/exyi/pg2parquet"
 name = "pg2parquet"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 
 [features]
