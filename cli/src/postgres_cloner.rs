@@ -139,7 +139,9 @@ fn read_password(user: &str) -> Result<String, String> {
 }
 
 #[cfg(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64"))))]
-fn build_tls_connector(certificates: &Option<Vec<PathBuf>>, accept_invalid_certs: bool) -> Result<postgres_native_tls::MakeTlsConnector, String> {
+fn build_tls_connector(certificates: &Option<Vec<PathBuf>>, accept_invalid_certs: bool, client_cert_key: Option<(&PathBuf, &PathBuf)>) -> Result<postgres_native_tls::MakeTlsConnector, String> {
+    use native_tls::Identity;
+
 	fn load_cert(f: &PathBuf) -> Result<native_tls::Certificate, String> {
 		let bytes = std::fs::read(f).map_err(|e| format!("Failed to read certificate file {:?}: {}", f, e))?;
 		if let Ok(pem) = native_tls::Certificate::from_pem(&bytes) {
@@ -162,6 +164,12 @@ fn build_tls_connector(certificates: &Option<Vec<PathBuf>>, accept_invalid_certs
 				builder.add_root_certificate(load_cert(cert)?);
 			}
 		}
+	}
+	if let Some((client_cert, client_key)) = client_cert_key {
+		let cert = std::fs::read(client_cert).map_err(|e| format!("Failed to read TLS client certificate {client_cert:?}: {e}"))?;
+		let key = std::fs::read(client_key).map_err(|e| format!("Failed to read TLS client key {client_key:?}: {e}"))?;
+		let identity = Identity::from_pkcs8(&cert, &key).map_err(|e| format!("Failed to parse TLS client certificate: {e}"))?;
+		builder.identity(identity);
 	}
 	let connector = builder.build().map_err(|e| format!("Creating TLS connector failed: {}", e.to_string()))?;
 	let pg_connector = postgres_native_tls::MakeTlsConnector::new(connector);
@@ -203,6 +211,14 @@ fn use_env_var(name: &str, label: &str, quiet: bool) -> Option<String> {
 	}
 }
 
+fn process_connection_string_parse_error(args: &PostgresConnArgs, conn_str: &str, e: postgres::Error) -> String {
+	let mut help = String::new();
+	if conn_str.contains("sslrootcert=") || conn_str.contains("sslcert=") || conn_str.contains("sslkey=") {
+		help += "\nThe sslrootcert, sslcert and sslkey options are not supported in the connection string. You can use --ssl-root-cert, --ssl-client-cert, --ssl-client-key CLI options instead to configure the TLS connection.";
+	}
+	format!("Failed to parse connection string: {e}{help}")
+}
+
 fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<Client, String> {
 	let mut config = postgres::Config::new();
 
@@ -211,7 +227,7 @@ fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<Client, String> {
 		.or_else(|| use_env_var("DATABASE_URL", "DB connection URL", quiet));
 	if let Some(connection_string) = connection_string {
 		config = connection_string.parse::<postgres::Config>()
-			.map_err(|e| format!("Failed to parse connection string: {}", e))?;
+			.map_err(|e| process_connection_string_parse_error(args, &connection_string, e))?;
 	} else {
 		let host = args.host.as_ref().unwrap();
 		let dbname = args.dbname.as_ref().unwrap();
@@ -263,7 +279,12 @@ fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<Client, String> {
 	// `Prefer` mode is succeptible to active attackers anyway due to downgrades,
 	// so we can allow untrusted (self-signed) certificates
 	let allow_invalid_certs = matches!(config.get_ssl_mode(), postgres::config::SslMode::Prefer);
-	let connector = build_tls_connector(&args.ssl_root_cert, allow_invalid_certs)?;
+	let client_cert = match (&args.ssl_client_cert, &args.ssl_client_key) {
+		(Some(cert), Some(key)) => Some((cert, key)),
+		(None, None) => None,
+		(None, Some(_)) | (Some(_), None) => return Err(format!("Options ssl-client-cert and ssl-client-key must both be specified."))
+	};
+	let connector = build_tls_connector(&args.ssl_root_cert, allow_invalid_certs, client_cert)?;
 
 	let client = config.connect(connector).map_err(|e| process_conn_error(e, args))?;
 

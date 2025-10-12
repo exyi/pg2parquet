@@ -102,9 +102,15 @@ pub struct PostgresConnArgs {
     /// Controls whether to use SSL/TLS to connect to the server.
     #[arg(long="sslmode", alias="tlsmode", alias="ssl-mode", alias="tls-mode")]
     sslmode: Option<SslMode>,
-    /// File with a TLS root certificate in PEM or DER (.crt) format. When specified, the default CA certificates are considered untrusted. The option can be specified multiple times. Using this options implies --sslmode=require.
+    /// File with a TLS root certificate in PEM or DER (.crt) format. When specified, the default CA certificates are considered untrusted. The option can be specified multiple times. The option implies --sslmode=require.
     #[arg(long="ssl-root-cert", alias="tls-root-cert")]
-    ssl_root_cert: Option<Vec<PathBuf>>
+    ssl_root_cert: Option<Vec<PathBuf>>,
+    /// File with a TLS client certificate in PEM format. Note that you also need to use the ssl-client-key option
+    #[arg(long="ssl-client-cert", alias="tls-client-cert")]
+    ssl_client_cert: Option<PathBuf>,
+    /// File with a TLS client key in PEM format. 
+    #[arg(long="ssl-client-key", alias="tls-client-key")]
+    ssl_client_key: Option<PathBuf>,
 }
 
 impl PostgresConnArgs {
