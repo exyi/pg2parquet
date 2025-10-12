@@ -177,8 +177,8 @@ fn build_tls_connector(certificates: &Option<Vec<PathBuf>>, accept_invalid_certs
 }
 
 #[cfg(not(any(target_os = "macos", target_os="windows", all(target_os="linux", not(target_env="musl"), any(target_arch="x86_64", target_arch="aarch64")))))]
-fn build_tls_connector(certificates: &Option<Vec<PathBuf>>, allow_invalid_certs: bool) -> Result<NoTls, String> {
-	if certificates.is_some() {
+fn build_tls_connector(certificates: &Option<Vec<PathBuf>>, allow_invalid_certs: bool, client_cert_key: Option<(&PathBuf, &PathBuf)>) -> Result<NoTls, String> {
+	if certificates.is_some() || client_cert_key.is_some() {
 		return Err("SSL/TLS is not supported in this build of pg2parquet".to_string());
 	}
 	Ok(NoTls)
