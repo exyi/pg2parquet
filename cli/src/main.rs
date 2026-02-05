@@ -12,6 +12,7 @@ mod level_index;
 mod parquetinfo;
 mod playground;
 mod parquet_writer;
+mod arrow_parallel_writer;
 mod postgres_cloner;
 mod pg_custom_types;
 mod datatypes;
@@ -65,6 +66,9 @@ struct ExportArgs {
     /// Avoid printing unnecessary information (schema and progress). Only errors will be written to stderr
     #[arg(long, hide_short_help = true)]
     quiet: bool,
+    /// Number of threads to use for parquet writing. Set to 1 for sequential processing
+    #[arg(long, hide_short_help = true, default_value = "4")]
+    threads: usize,
     #[command(flatten)]
     postgres: PostgresConnArgs,
     #[command(flatten)]
@@ -297,7 +301,20 @@ fn perform_export(args: ExportArgs) {
     let query = args.query.unwrap_or_else(|| {
         format!("SELECT * FROM {}", args.table.unwrap())
     });
-    let result = postgres_cloner::execute_copy(&args.postgres, &query, &args.output_file, props, args.quiet, &settings);
+    
+    let result = {
+        if !args.quiet {
+            if args.threads > 1 {
+                eprintln!("Using parallel parquet writing with {} threads", args.threads);
+            } else {
+                eprintln!("Using sequential parquet writing (single thread)");
+            }
+        }
+        postgres_cloner::execute_copy(
+            &args.postgres, &query, &args.output_file, props, args.quiet, &settings, args.threads
+        )
+    };
+    
     let _stats = handle_result(result);
 
     // eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);

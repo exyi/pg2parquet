@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::Arc, borrow::Cow};
+use std::{borrow::Cow, io::Read, marker::PhantomData, sync::Arc};
 
 use byteorder::{ReadBytesExt, ByteOrder, BigEndian};
 use bytes::{Bytes, BufMut};
@@ -7,13 +7,17 @@ use parquet::{data_type::{DataType, ByteArray, FixedLenByteArray, ByteArrayType}
 use crate::{level_index::{LevelIndexState, LevelIndexList}, myfrom::MyFrom, pg_custom_types::{PgAnyRef, PgAbstractRow}};
 
 use super::{real_memory_size::RealMemorySize, ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter};
+use arrow::array::{ArrayRef, BinaryBuilder};
+use arrow::datatypes::DataType as ArrowDataType;
 
 
 pub struct ByteArrayColumnAppender<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> {
 	max_dl: i16,
 	max_rl: i16,
-	byte_buffer: Vec<u8>,
-	offsets: Vec<usize>,
+	// Build Arrow Binary directly; avoids maintaining custom buffers
+	builder: BinaryBuilder,
+	// Temporary scratch buffer for conversion closure
+	scratch: Vec<u8>,
 	dls: Vec<i16>,
 	rls: Vec<i16>,
 	repetition_index: LevelIndexState,
@@ -28,8 +32,8 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 		}
 		ByteArrayColumnAppender {
 			max_dl, max_rl,
-			byte_buffer: Vec::new(),
-			offsets: Vec::new(),
+			builder: BinaryBuilder::new(),
+			scratch: Vec::new(),
 			_dummy: PhantomData,
 			dls: Vec::new(),
 			rls: Vec::new(),
@@ -39,10 +43,11 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 	}
 
 	pub fn append(&mut self, repetition_index: &LevelIndexList, value: &TPg) -> usize {
-		let index = self.byte_buffer.len();
-		if let Some(len) = (self.conversion)(value, &mut self.byte_buffer) {
-			debug_assert_eq!(index + len, self.byte_buffer.len());
-			self.offsets.push(index);
+		// Prepare scratch and convert value into it
+		self.scratch.clear();
+		if let Some(len) = (self.conversion)(value, &mut self.scratch) {
+			debug_assert_eq!(len, self.scratch.len());
+			self.builder.append_value(&self.scratch);
 
 			if self.max_dl > 0 {
 				self.dls.push(self.max_dl);
@@ -79,8 +84,7 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 
 		let writer_t = writer.typed::<ByteArrayType>();
 
-		if self.offsets.len() == 0 {
-			assert_eq!(0, self.byte_buffer.len());
+		if self.builder.offsets_slice().len() == 0 {
 			writer_t.write_batch(&[], dls, rls)?;
 			self.dls.clear();
 			self.rls.clear();
@@ -92,25 +96,24 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 		// 	println!("           RLS: {:?}", self.rls);
 		// 	println!("           DLS: {:?}", self.dls);
 		// }
-		let mut byte_array = Vec::new();
-		std::mem::swap(&mut self.byte_buffer, &mut byte_array);
-		let byte_array = Bytes::from(byte_array);
+		let mut builder = BinaryBuilder::new();
+		std::mem::swap(&mut self.builder, &mut builder);
+		let built = builder.finish();
+		let byte_array = Bytes::from(built.values().to_vec());
 
-		let mut column: Vec<ByteArray> = vec![ByteArray::new(); self.offsets.len()];
-		for ((&offset, &next), out) in self.offsets.iter().zip(self.offsets.iter().skip(1)).zip(column.iter_mut()) {
-			let b: Bytes = byte_array.slice(offset..next);
+		let offsets = self.builder.offsets_slice();
+
+		let mut column: Vec<ByteArray> = vec![ByteArray::new(); offsets.len()];
+		for ((&offset, &next), out) in offsets.iter().zip(offsets.iter().skip(1)).zip(column.iter_mut()) {
+			let b = byte_array.slice((offset as usize)..(next as usize));
 			let b_array: ByteArray = ByteArray::from(b);
 			*out = b_array;
 		}
-		column[self.offsets.len()-1] = ByteArray::from(byte_array.slice(*self.offsets.last().unwrap()..));
+		column[offsets.len()-1] = ByteArray::from(byte_array.slice(*offsets.last().unwrap() as usize..));
 
 		let _num_written = writer_t.write_batch(&column, dls, rls)?;
-		let buffer_length = byte_array.len();
 		std::mem::drop((column, byte_array));
 		
-		self.byte_buffer.reserve(buffer_length);
-		self.offsets.clear();
-		assert_eq!(0, self.byte_buffer.len());
 		self.dls.clear();
 		self.rls.clear();
 
@@ -148,6 +151,27 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppende
 
 	fn max_dl(&self) -> i16 { self.max_dl }
 	fn max_rl(&self) -> i16 { self.max_rl }
+
+	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
+		match target {
+			ArrowDataType::Binary => {
+				// Finish and reset the builder; dls/rls not needed for Arrow output now
+				let arr = Arc::new(std::mem::take(&mut self.builder).finish()) as ArrayRef;
+				self.builder = BinaryBuilder::new();
+				self.dls.clear();
+				self.rls.clear();
+				Ok(arr)
+			}
+			_ => Err("Arrow BYTE_ARRAY export: unsupported target type".to_string())
+		}
+	}
+
+	fn clear(&mut self) {
+		self.builder = BinaryBuilder::new();
+		self.scratch.clear();
+		self.dls.clear();
+		self.rls.clear();
+	}
 }
 
 impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FCopyTo> {

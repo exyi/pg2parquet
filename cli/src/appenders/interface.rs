@@ -1,6 +1,9 @@
 use std::{borrow::Cow, sync::Arc, cell::RefCell, io::Write};
 
 use parquet::file::writer::{SerializedColumnWriter, SerializedRowGroupWriter};
+// Arrow exports: allow appenders to materialize Arrow arrays for parallel compression path
+use arrow::array::ArrayRef;
+use arrow::datatypes::DataType as ArrowDataType;
 
 use crate::level_index::LevelIndexList;
 
@@ -11,6 +14,15 @@ pub trait ColumnAppenderBase {
 
 	fn max_dl(&self) -> i16;
 	fn max_rl(&self) -> i16;
+
+	// Export this column as an Arrow Array matching the target type.
+	// Default implementation returns an error; concrete appenders should override when supported.
+	fn to_arrow_array(&mut self, _target: &ArrowDataType) -> Result<ArrayRef, String> { Err("Arrow export not supported for this appender".to_string()) }
+
+	// No-op by default; some appenders may ignore Arrow entirely.
+
+	// Optional: clear buffered values after a flush
+	fn clear(&mut self) {}
 }
 
 pub trait ColumnAppender<TPg: Clone>: ColumnAppenderBase {
@@ -45,6 +57,14 @@ impl<T> ColumnAppenderBase for DynColumnAppender<T> {
     fn max_rl(&self) -> i16 {
         self.as_ref().max_rl()
     }
+
+	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
+		self.as_mut().to_arrow_array(target)
+	}
+
+	fn clear(&mut self) {
+		self.as_mut().clear();
+	}
 }
 
 impl<T: Clone> ColumnAppender<T> for DynColumnAppender<T> {

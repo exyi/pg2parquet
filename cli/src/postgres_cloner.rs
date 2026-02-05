@@ -22,17 +22,20 @@ use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
 use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{GroupTypeBuilder, PrimitiveTypeBuilder, Type as ParquetType, TypePtr};
 use half::f16;
+use arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField, DataType as ArrowDataType, TimeUnit};
+use arrow::array::{ArrayRef, Int16Builder, Int32Builder, Int64Builder, Float32Builder, Float64Builder, BooleanBuilder, BinaryBuilder, StringBuilder, UInt32Builder, FixedSizeBinaryBuilder};
+use arrow::record_batch::RecordBatch;
 
 use crate::datatypes::array::{PgMultidimArray, PgMultidimArrayLowerBounds};
 use crate::datatypes::pgvector::{self, PgSparseVector};
 use crate::PostgresConnArgs;
-use crate::appenders::{new_autoconv_generic_appender, new_static_merged_appender, ArrayColumnAppender, BasicPgRowColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, GenericColumnAppender, PreprocessAppender, PreprocessExt, RcWrapperAppender, RealMemorySize, StaticMergedAppender};
+use crate::appenders::{new_autoconv_generic_appender, new_static_merged_appender, ArrayColumnAppender, BasicPgRowColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, GenericColumnAppender, PreprocessAppender, PreprocessExt, RcWrapperAppender, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::{new_decimal_bytes_appender, new_decimal_int_appender};
 use crate::myfrom::{MyFrom, self};
-use crate::parquet_writer::{WriterStats, ParquetRowWriter, WriterSettings};
+use crate::parquet_writer::{WriterStats, WriterSettings};
 use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef, UnclonableHack};
 
 type ResolvedColumn<TRow> = (DynColumnAppender<TRow>, ParquetType);
@@ -291,12 +294,20 @@ fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<Client, String> {
 	Ok(client)
 }
 
-pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathBuf, output_props: WriterPropertiesPtr, quiet: bool, schema_settings: &SchemaSettings) -> Result<WriterStats, String> {
+pub fn execute_copy(
+	pg_args: &PostgresConnArgs, 
+	query: &str, 
+	output_file: &PathBuf, 
+	output_props: WriterPropertiesPtr, 
+	quiet: bool, 
+	schema_settings: &SchemaSettings,
+	_threads: usize,
+) -> Result<WriterStats, String> {
 
 	let mut client = pg_connect(pg_args, quiet)?;
 	let statement = client.prepare(query).map_err(|db_err| { db_err.to_string() })?;
 
-	let (row_appender, schema) = map_schema_root(statement.columns(), schema_settings)?;
+	let (_row_appender_unused, schema) = map_schema_root(statement.columns(), schema_settings)?;
 	if !quiet {
 		eprintln!("Schema: {}", format_schema(&schema, 0));
 	}
@@ -305,22 +316,152 @@ pub fn execute_copy(pg_args: &PostgresConnArgs, query: &str, output_file: &PathB
 	let settings = WriterSettings { row_group_byte_limit: 500 * 1024 * 1024, row_group_row_limit: output_props.max_row_group_size() };
 
 	let output_file_f = std::fs::File::create(output_file).unwrap();
-	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props)
+	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props.clone())
 		.map_err(|e| format!("Failed to create parquet writer: {}", e))?;
-	let mut row_writer = ParquetRowWriter::new(pq_writer, schema.clone(), row_appender, quiet, settings)
-		.map_err(|e| format!("Failed to create row writer: {}", e))?;
 
-	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
-		.map_err(|err| format!("Failed to execute the SQL query: {}", err))?;
-	for row in rows.iterator() {
-		let row = row.map_err(|err| err.to_string())?;
-		let row = Arc::new(row);
+	// Appender-driven Arrow path for supported mixed-type batches: try Arrow export per batch; fallback per-batch otherwise
+	{
+		use arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField, DataType as ArrowDataType};
+		use arrow::array::ArrayRef;
+		use arrow::record_batch::RecordBatch;
 
-		row_writer.write_row(row)?;
+		// Derive Arrow fields from parquet schema types (primitive, lists, structs)
+		fn arrow_field_for_parquet_leaf(p: &ParquetType, name: &str) -> Option<ArrowField> {
+			match p {
+				ParquetType::PrimitiveType { basic_info, physical_type, type_length, .. } => {
+					let nullable = basic_info.repetition() != Repetition::REQUIRED;
+					let dt = match physical_type {
+						basic::Type::BOOLEAN => ArrowDataType::Boolean,
+						basic::Type::INT32 => ArrowDataType::Int32,
+						basic::Type::INT64 => ArrowDataType::Int64,
+						basic::Type::INT96 => panic!(),
+						basic::Type::FLOAT => ArrowDataType::Float32,
+						basic::Type::DOUBLE => ArrowDataType::Float64,
+						basic::Type::BYTE_ARRAY => ArrowDataType::Binary,
+						basic::Type::FIXED_LEN_BYTE_ARRAY => {
+							// Preserve fixed size for Arrow so special logical types (e.g., INTERVAL 12 bytes, UUID 16) round-trip correctly
+							ArrowDataType::FixedSizeBinary(*type_length)
+						}
+					};
+					Some(ArrowField::new(name, dt, nullable))
+				},
+				ParquetType::GroupType { basic_info, fields } => {
+					// Handle LIST and STRUCT
+					let nullable = basic_info.repetition() != Repetition::REQUIRED;
+					match basic_info.logical_type() {
+						Some(LogicalType::List) => {
+							// Expect single repeated child group with one field "element"
+							if fields.len() != 1 { return None; }
+							let list_group = &fields[0];
+							match list_group.as_ref() {
+								ParquetType::GroupType { fields: elem_fields, .. } if elem_fields.len() == 1 => {
+									let ef = elem_fields[0].as_ref();
+									let inner = arrow_field_for_parquet_leaf(ef, "element")?;
+									Some(ArrowField::new(name, ArrowDataType::List(Arc::new(inner)), nullable))
+								},
+								_ => None,
+							}
+						}
+						_ => {
+							// Struct or other group: map each field recursively
+							let mut arrow_fields: Vec<ArrowField> = Vec::with_capacity(fields.len());
+							for f in fields.iter() {
+								// Preserve Parquet field name
+								let fref = f.as_ref();
+								let fname = match fref {
+									ParquetType::PrimitiveType { basic_info, .. } => basic_info.name().to_string(),
+									ParquetType::GroupType { basic_info, .. } => basic_info.name().to_string(),
+								};
+								if let Some(af) = arrow_field_for_parquet_leaf(fref, &fname) { arrow_fields.push(af); } else { return None; }
+							}
+							Some(ArrowField::new(name, ArrowDataType::Struct(arrow::datatypes::Fields::from(arrow_fields)), nullable))
+						}
+					}
+				}
+			}
+		}
+
+		// Build per-column appenders (reuse schema mapping) and Arrow fields; use Arrow path when every root column maps to a supported Arrow type
+		let mut col_appenders: Vec<DynColumnAppender<Arc<Row>>> = Vec::with_capacity(statement.columns().len());
+		let mut fields: Vec<ArrowField> = Vec::with_capacity(statement.columns().len());
+	for (i, c) in statement.columns().iter().enumerate() {
+			let col_info = ColumnInfo::root(i, c.name().to_string());
+			// Use full schema mapper so enums and other custom types are properly handled.
+			let (app, pt) = map_schema_column::<Arc<Row>>(c.type_(), &col_info, schema_settings)?;
+			// Use Arrow fast path if the parquet type is supported by Arrow conversion
+			let af = arrow_field_for_parquet_leaf(&pt, c.name());
+			match af { Some(f) => { fields.push(f); col_appenders.push(app); }, None => { fields.clear(); break; } }
+		}
+
+		if !fields.is_empty() {
+			let arrow_schema = Arc::new(ArrowSchema::new(fields));
+			let parquet_schema = schema.clone();
+			// Preflight: ensure the number of Arrow leaf columns matches Parquet leaves and appenders support Arrow export.
+			// We avoid consuming appender buffers during preflight; this only checks schema mapping.
+			// Use buffered Arrow export per-batch; do not require prior preparation
+			// Take ownership of the file writer for Arrow path
+			let mut apw = {
+				let fw = pq_writer;
+				crate::arrow_parallel_writer::create_arrow_parallel_writer(
+					fw, arrow_schema.clone(), parquet_schema, output_props.clone(), settings.clone()
+				)
+			};
+
+			let mut lvl = crate::level_index::LevelIndexList::new();
+			let mut batch_rows = 0usize;
+			let use_arrow = true;
+			let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
+				.map_err(|err| format!("Failed to execute the SQL query: {}", err))?;
+			for r in rows.iterator() {
+				let row = Arc::new(r.map_err(|err| err.to_string())?);
+				for app in col_appenders.iter_mut() { app.copy_value(&lvl, Cow::Borrowed(&row))?; }
+				lvl.inc();
+				batch_rows += 1; 
+				// Try to flush batches via Arrow when large enough
+				if batch_rows >= 4096 {
+					let arrays: Vec<ArrayRef> = {
+						let mut out = Vec::with_capacity(col_appenders.len());
+						for (i, a) in col_appenders.iter_mut().enumerate() {
+							let target = arrow_schema.field(i).data_type().clone();
+							let arr = a.to_arrow_array(&target)?;
+							out.push(arr);
+						}
+						out
+					};
+					let rb = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| e.to_string())?;
+					apw.write_batch(&rb)?;
+					batch_rows = 0;
+				}
+			}
+			// Flush any remaining via Arrow if still using it
+			if use_arrow && batch_rows > 0 {
+				let arrays: Vec<ArrayRef> = (0..col_appenders.len())
+					.map(|i| col_appenders[i].to_arrow_array(arrow_schema.field(i).data_type()))
+					.collect::<Result<Vec<_>,_>>()?;
+				if !quiet {
+					let lens: Vec<usize> = arrays.iter().map(|a| a.len()).collect();
+					eprintln!("[arrow-appender] final arrays lens: {:?}", lens);
+				}
+				let rb = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| e.to_string())?;
+				if !quiet { eprintln!("[arrow-appender] final batch rows: {}", rb.num_rows()); }
+				apw.write_batch(&rb)?;
+			}
+
+			if use_arrow {
+				let stats = apw.close()?;
+				if !quiet { eprintln!("[arrow-appender] wrote {} rows, {} groups", stats.rows, stats.groups); }
+				return Ok(stats);
+			}
+		}
 	}
 
-	Ok(row_writer.close()?)
+	// With mandatory Arrow export, we should never reach a sequential fallback.
+	// If we did, return a clear error.
+	Err("Sequential parquet fallback is disabled; Arrow export is mandatory for all columns".to_string())
 }
+
+// Sequential row-group flush using existing appenders
+fn flush_rowgroup_with_appender<W: std::io::Write + Send>(_file_writer: &mut SerializedFileWriter<W>, _row_appender: &mut DynColumnAppender<Arc<Row>>) -> Result<(), String> { unreachable!() }
 
 fn format_schema(schema: &ParquetType, indent: u32) -> String {
 	fn format_time_unit(u: &parquet::format::TimeUnit) -> &str {
@@ -454,51 +595,100 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 			let list_column = c.nest("list", 0).as_array();
 			let element_column = list_column.nest("element", 0);
 
-			let (element_appender, element_schema) = map_schema_column(element_type, &element_column, settings)?;
-			
+			let (element_appender, element_schema) = map_schema_column::<PgAny>(element_type, &element_column, settings)?;
 			debug_assert_eq!(element_schema.name(), "element");
 
 			let plain_schema = settings.array_handling == SchemaSettingsArrayHandling::Plain;
-
 			let schema = if plain_schema {
-				make_list_schema(c.col_name(), Repetition::OPTIONAL, element_schema)
+				make_list_schema(c.col_name(), Repetition::OPTIONAL, element_schema.clone())
 			} else {
-				make_list_schema("data", Repetition::REQUIRED, element_schema)
+				make_list_schema("data", Repetition::REQUIRED, element_schema.clone())
 			};
 
+			// Build array appender for the logical value type: PgMultidimArray<Option<PgAny>>
 			assert_eq!(element_appender.max_dl(), element_column.definition_level + 1);
 			assert_eq!(element_appender.max_rl(), element_column.repetition_level);
-			let array_appender = create_array_appender(element_appender, &c, plain_schema);
-			let dim_appender = create_array_dim_appender::<PgAny, TRow>(&c);
-			let lb_appender = create_array_lower_bound_appender::<PgAny, TRow>(&c);
+			let outer_dl = c.definition_level + 1;
+			let array_inner = ArrayColumnAppender::new(element_appender, true, true, outer_dl, c.repetition_level);
+			let warned = AtomicBool::new(false);
+			let col_clone = c.clone();
+			let array_for_value = array_inner.preprocess(move |x: Cow<PgMultidimArray<Option<PgAny>>>| {
+				if plain_schema && x.dims.is_some() && !warned.load(Ordering::Relaxed) {
+					if !warned.fetch_or(true, Ordering::SeqCst) {
+						eprintln!("Warning: Column {} contains a {}-dimensional array which will be flattened in Parquet (i.e. {} -> {}). Use --array-handling=dimensions, include another column with the PostgreSQL array dimensions.",
+							col_clone.full_name(),
+							x.dims.as_ref().unwrap().len(),
+							x.dims.as_ref().unwrap().iter().map(|x| x.to_string()).collect::<Vec<_>>().join("x"),
+							x.data.len()
+						)
+					}
+				}
+				match x {
+					Cow::Owned(x) => Cow::Owned(x.data),
+					Cow::Borrowed(x) => Cow::Borrowed(&x.data)
+				}
+			});
+
+			// Build dims and lower_bound appenders for the logical value type
+			let int_appender = new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level + 1);
+			let dims_for_value = ArrayColumnAppender::new(int_appender, false, false, c.definition_level + 1, c.repetition_level)
+				.preprocess(|x: Cow<PgMultidimArray<Option<PgAny>>>| Cow::<Vec<Option<i32>>>::Owned(
+					x.dims.as_ref()
+						.map(|x| x.iter().map(|c| Some(*c)).collect())
+						.unwrap_or_else(|| if x.data.len() == 0 { Vec::new() } else { vec![Some(x.data.len() as i32)] })
+				));
+			let lb_for_value = ArrayColumnAppender::new(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level + 1), false, false, c.definition_level + 1, c.repetition_level)
+				.preprocess(|x: Cow<PgMultidimArray<Option<PgAny>>>| Cow::<Vec<Option<i32>>>::Owned(
+					match &x.lower_bounds {
+						_ if x.data.len() == 0 => Vec::new(),
+						PgMultidimArrayLowerBounds::Const(c) => vec![Some(*c); x.dims.as_ref().map(|x| x.len()).unwrap_or(1)],
+						PgMultidimArrayLowerBounds::PerDim(v) => v.iter().map(|x| Some(*x)).collect()
+					}
+				));
+
 			let dim_schema = make_list_schema("dims", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: false })).build().unwrap());
 			let lb_schema = make_list_schema("lower_bound", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: true })).build().unwrap());
+
 			match settings.array_handling {
-				SchemaSettingsArrayHandling::Plain => Ok((Box::new(array_appender), schema)),
-				SchemaSettingsArrayHandling::Dimensions => Ok((
-					Box::new(
-						new_static_merged_appender(c.definition_level + 1, c.repetition_level).add_appender(array_appender).add_appender(dim_appender)
-					),
-					ParquetType::group_type_builder(c.col_name())
-						.with_repetition(Repetition::OPTIONAL)
-						.with_fields(vec![ Arc::new(schema), Arc::new(dim_schema) ])
-						.build().unwrap()
-				)),
-				SchemaSettingsArrayHandling::DimensionsAndLowerBound => Ok((
-					Box::new(
-						new_static_merged_appender(c.definition_level + 1, c.repetition_level).add_appender(array_appender).add_appender(dim_appender).add_appender(lb_appender)
-					),
-					ParquetType::group_type_builder(c.col_name())
-						.with_repetition(Repetition::OPTIONAL)
-						.with_fields(vec![ Arc::new(schema), Arc::new(dim_schema), Arc::new(lb_schema) ])
-						.build().unwrap()
-				))
+				SchemaSettingsArrayHandling::Plain => {
+					let wrapped = wrap_pg_row_reader::<TRow, PgMultidimArray<Option<PgAny>>>(&c, array_for_value);
+					Ok((Box::new(wrapped), schema))
+				},
+				SchemaSettingsArrayHandling::Dimensions => {
+					let children: Vec<DynColumnAppender<PgMultidimArray<Option<PgAny>>>> = vec![
+						Box::new(array_for_value),
+						Box::new(dims_for_value),
+					];
+					let dynm = DynamicMergedAppender::new(children, c.definition_level + 1, c.repetition_level);
+					let dynm_opt = UnwrapOptionAppender::new(dynm);
+					let wrapped = wrap_pg_row_reader::<TRow, Option<PgMultidimArray<Option<PgAny>>>>(&c, dynm_opt);
+					Ok((Box::new(wrapped),
+						ParquetType::group_type_builder(c.col_name())
+							.with_repetition(Repetition::OPTIONAL)
+							.with_fields(vec![ Arc::new(schema), Arc::new(dim_schema) ])
+							.build().unwrap()))
+				},
+				SchemaSettingsArrayHandling::DimensionsAndLowerBound => {
+					let children: Vec<DynColumnAppender<PgMultidimArray<Option<PgAny>>>> = vec![
+						Box::new(array_for_value),
+						Box::new(dims_for_value),
+						Box::new(lb_for_value),
+					];
+					let dynm = DynamicMergedAppender::new(children, c.definition_level + 1, c.repetition_level);
+					let dynm_opt = UnwrapOptionAppender::new(dynm);
+					let wrapped = wrap_pg_row_reader::<TRow, Option<PgMultidimArray<Option<PgAny>>>>(&c, dynm_opt);
+					Ok((Box::new(wrapped),
+						ParquetType::group_type_builder(c.col_name())
+							.with_repetition(Repetition::OPTIONAL)
+							.with_fields(vec![ Arc::new(schema), Arc::new(dim_schema), Arc::new(lb_schema) ])
+							.build().unwrap()))
+				},
 			}
 		},
 		Kind::Domain(ref element_type) => {
 			map_schema_column(element_type, c, settings)
 		},
-		&Kind::Range(ref element_type) => {
+	&Kind::Range(ref element_type) => {
 			let col_lower = map_schema_column::<UnclonableHack<PgRawRange>>(element_type, &c.nest("lower", 0), settings)?;
 			let col_upper = map_schema_column::<UnclonableHack<PgRawRange>>(element_type, &c.nest("upper", 1), settings)?;
 
@@ -514,27 +704,20 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 				.build()
 				.unwrap();
 
-			let appender = new_static_merged_appender::<UnclonableHack<PgRawRange>>(c.definition_level + 1, c.repetition_level)
-				.add_appender(col_lower.0)
-				.add_appender(col_upper.0)
-				.add_appender_map(
-					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
-					|r| Cow::Owned(r.0.lower_inclusive)
-				)
-				.add_appender_map(
-					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
-					|r| Cow::Owned(r.0.upper_inclusive)
-				)
-				.add_appender_map(
-					new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level),
-					|r| Cow::Owned(r.0.is_empty)
-				)
-				.preprocess(|x: Cow<PgRawRange>| match x {
-					Cow::Owned(x) => Cow::Owned(UnclonableHack(x)),
-					Cow::Borrowed(_) => panic!()
-				});
+			// Build a dynamic merged appender so Arrow Struct export is supported
+			let mut children: Vec<DynColumnAppender<UnclonableHack<PgRawRange>>> = Vec::new();
+			children.push(col_lower.0);
+			children.push(col_upper.0);
+			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level)
+				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.lower_inclusive))));
+			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level)
+				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.upper_inclusive))));
+			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level)
+				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.is_empty))));
+			let dynm = DynamicMergedAppender::new(children, c.definition_level + 1, c.repetition_level)
+				.preprocess(|x: Cow<PgRawRange>| match x { Cow::Owned(x) => Cow::Owned(UnclonableHack(x)), Cow::Borrowed(_) => panic!() });
 
-			let appender_dyn = wrap_pg_row_reader(c, appender);
+			let appender_dyn = wrap_pg_row_reader(c, dynm);
 
 			Ok((Box::new(appender_dyn), schema))
 		},
@@ -644,11 +827,16 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 							Arc::new(ParquetType::primitive_type_builder("microseconds", basic::Type::INT64).build().unwrap()),
 						])
 						.build().unwrap();
-					let appender = new_static_merged_appender::<PgInterval>(c.definition_level + 1, c.repetition_level)
-						.add_appender_map(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.months))
-						.add_appender_map(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.days))
-						.add_appender_map(new_autoconv_generic_appender::<i64, Int64Type>(c.definition_level + 2, c.repetition_level), |i| Cow::Owned(i.microseconds));
-					(Box::new(wrap_pg_row_reader(c, appender)), t)
+					// Build a dynamic merged appender so Arrow Struct export is supported
+					let mut children: Vec<DynColumnAppender<PgInterval>> = Vec::new();
+					children.push(Box::new(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level)
+						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.months))));
+					children.push(Box::new(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level)
+						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.days))));
+					children.push(Box::new(new_autoconv_generic_appender::<i64, Int64Type>(c.definition_level + 2, c.repetition_level)
+						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.microseconds))));
+					let dynm = DynamicMergedAppender::new(children, c.definition_level + 1, c.repetition_level);
+					(Box::new(wrap_pg_row_reader(c, dynm)), t)
 				},
 			},
 

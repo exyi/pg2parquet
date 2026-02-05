@@ -9,16 +9,17 @@ packages = [{include = "pg2parquet_pytests"}]
 name = "pg2parquet-pytests"
 version = "0.1.0"
 description = ""
-requires-python = ">=3.12"
+requires-python = ">=3.12,<4.0"
 
 [tool.poetry.dependencies]
 numpy = "2.2.3"
 pyarrow = "^19.0.1"
-psycopg = "^3.1.19"
+psycopg = "^3.2.10"
 duckdb = "^1.2.1"
 polars = "^1.24.0"
 pytest = ">=8.2,<10.0"
 pandas = "^2.2.3"
+mimesis = "^18.0.0"
 
 [build-system]
 requires = ["poetry-core"]

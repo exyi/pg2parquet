@@ -3,23 +3,32 @@ use std::{sync::Arc, borrow::Cow, marker::PhantomData};
 use crate::{level_index::LevelIndexList, myfrom::MyFrom};
 
 use super::{ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, GenericColumnAppender, DynColumnAppender};
+// Arrow: compose child arrays into StructArray for struct/group columns
+use arrow::array::{ArrayRef, BinaryDictionaryBuilder, StructArray};
+use arrow::datatypes::DataType as ArrowDataType;
 
 pub struct DynamicMergedAppender<T> {
 	columns: Vec<DynColumnAppender<T>>,
 	max_dl: i16,
-	max_rl: i16
+	max_rl: i16,
+	// Track parent-level presence per row so we can set Struct nulls correctly in Arrow
+	present: Vec<bool>,
 }
 
 impl<T> DynamicMergedAppender<T> {
 	pub fn new(columns: Vec<DynColumnAppender<T>>, max_dl: i16, max_rl: i16) -> Self {
-		DynamicMergedAppender { columns, max_dl, max_rl }
+		DynamicMergedAppender { columns, max_dl, max_rl, present: Vec::new() }
 	}
 }
 
 impl<T> ColumnAppenderBase for DynamicMergedAppender<T> {
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		// Any null forwarded to this struct corresponds to a struct row placeholder
+		self.present.push(false);
 		let mut total = 0;
 		for c in self.columns.iter_mut() {
+			// For list children, force a null list row (so Arrow List validity matches parent struct null)
+			// Heuristic: lists have max_rl() > 0
 			total += c.write_null(repetition_index, level)?;
 		}
 		Ok(total)
@@ -39,10 +48,47 @@ impl<T> ColumnAppenderBase for DynamicMergedAppender<T> {
 	fn max_rl(&self) -> i16 {
 		self.max_rl
 	}
+
+	fn to_arrow_array(&mut self, target: &arrow::datatypes::DataType) -> Result<arrow::array::ArrayRef, String> {
+		// Only support Struct targets here; defer to children otherwise
+		let ArrowDataType::Struct(fields) = target else { return Err("Arrow STRUCT export: unsupported target type".to_string()) };
+		if fields.len() != self.columns.len() {
+			return Err(format!("Struct field count mismatch: target has {}, appenders {}", fields.len(), self.columns.len()));
+		}
+
+		// Build child arrays in order
+		let mut child_arrays: Vec<ArrayRef> = Vec::with_capacity(self.columns.len());
+		for (i, col) in self.columns.iter_mut().enumerate() {
+			let dt = fields[i].data_type();
+			let arr = col.to_arrow_array(dt)?;
+			child_arrays.push(arr);
+		}
+		// Derive struct-level validity from tracked presence
+		let rows = if child_arrays.is_empty() { self.present.len() } else { child_arrays[0].len() };
+		if rows != self.present.len() {
+			return Err(format!("Struct row count mismatch: children={}, present={}", rows, self.present.len()));
+		}
+		let validity = if self.present.contains(&false) { Some(arrow::buffer::NullBuffer::from(self.present.as_slice())) } else { None };
+
+		// Build a Fields list from the provided Struct data type for construction
+		let arrow_fields = fields.clone();
+		let sa = StructArray::try_new(arrow_fields, child_arrays, validity)
+			.map_err(|e| e.to_string())?;
+		// Clear presence after successful export to avoid leaking state across batches
+		self.present.clear();
+	Ok(std::sync::Arc::new(sa) as ArrayRef)
+	}
+
+	fn clear(&mut self) {
+		for c in self.columns.iter_mut() { c.clear(); }
+		self.present.clear();
+	}
 }
 
 impl<T: Clone> ColumnAppender<T> for DynamicMergedAppender<T> {
 	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<T>) -> Result<usize, String> {
+		// Record a non-null struct row
+		self.present.push(true);
 		let mut total = 0;
 		let reader_r = reader.as_ref();
 		for c in self.columns.iter_mut() {
@@ -100,6 +146,11 @@ impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> ColumnAppe
     fn max_rl(&self) -> i16 {
         self.next.max_rl()
     }
+
+    fn clear(&mut self) {
+        self.next.clear();
+        self.appender.clear();
+    }
 }
 
 impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> ColumnAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
@@ -129,6 +180,8 @@ impl ColumnAppenderBase for StaticMergedAppenderNil {
     fn max_dl(&self) -> i16 { self.max_dl }
 
     fn max_rl(&self) -> i16 { self.max_rl }
+
+    fn clear(&mut self) {}
 }
 
 impl<T: Clone> ColumnAppender<T> for StaticMergedAppenderNil {

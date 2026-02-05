@@ -29,6 +29,15 @@ impl<T: Clone, Appender2: ColumnAppender<T>> ColumnAppenderBase for UnwrapOption
     fn max_rl(&self) -> i16 {
         self.appender.max_rl()
     }
+
+    fn to_arrow_array(&mut self, target: &arrow::datatypes::DataType) -> Result<arrow::array::ArrayRef, String> {
+        self.appender.to_arrow_array(target)
+    }
+
+    fn clear(&mut self) {
+        self.appender.clear();
+    }
+
 }
 impl<T: Clone, Appender2: ColumnAppender<T>> ColumnAppender<Option<T>> for UnwrapOptionAppender<T, Appender2> {
     fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<Option<T>>) -> Result<usize, String> {
@@ -62,10 +71,29 @@ impl<T1: Clone, T2: Clone, Appender2: ColumnAppender<T2>, F: Fn(Cow<T1>) -> Cow<
     fn max_rl(&self) -> i16 {
         self.appender.max_rl()
     }
+
+    fn to_arrow_array(&mut self, target: &arrow::datatypes::DataType) -> Result<arrow::array::ArrayRef, String> {
+        self.appender.to_arrow_array(target)
+    }
+
+    fn clear(&mut self) {
+        self.appender.clear();
+    }
+
 }
 impl<T1: Clone, T2: Clone, Appender2: ColumnAppender<T2>, F: Fn(Cow<T1>) -> Cow<T2>> ColumnAppender<T1> for PreprocessAppender<T1, T2, Appender2, F> {
     fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<T1>) -> Result<usize, String> {
         self.appender.copy_value(repetition_index, (self.f)(value))
+    }
+    fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Cow<Option<T1>>) -> Result<usize, String> {
+        match value {
+            Cow::Owned(Some(v)) => self.copy_value(repetition_index, Cow::Owned(v)),
+            Cow::Borrowed(Some(v)) => self.copy_value(repetition_index, Cow::Borrowed(v)),
+            Cow::Owned(None) | Cow::Borrowed(None) => {
+                // Forward None to inner so wrappers (e.g., ArrayColumnAppender) can update per-row trackers
+                self.appender.copy_value_opt(repetition_index, Cow::Owned(None))
+            }
+        }
     }
 }
 pub trait PreprocessExt<T2: Clone, Appender2: ColumnAppender<T2>> {
@@ -98,6 +126,13 @@ impl<T, TInner: ColumnAppender<Arc<T>>> ColumnAppenderBase for RcWrapperAppender
 	fn max_dl(&self) -> i16 { self.inner.max_dl() }
 
 	fn max_rl(&self) -> i16 { self.inner.max_rl() }
+
+    fn to_arrow_array(&mut self, target: &arrow::datatypes::DataType) -> Result<arrow::array::ArrayRef, String> {
+        self.inner.to_arrow_array(target)
+    }
+
+    fn clear(&mut self) { self.inner.clear(); }
+
 }
 impl<T: Clone, TInner: ColumnAppender<Arc<T>>> ColumnAppender<T> for RcWrapperAppender<T, TInner> {
 	fn copy_value(&mut self, repetition_index: &crate::level_index::LevelIndexList, value: Cow<T>) -> Result<usize, String> {

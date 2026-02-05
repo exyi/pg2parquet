@@ -7,6 +7,9 @@ use bigdecimal::ToPrimitive;
 use crate::appenders::{GenericColumnAppender, ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter, new_autoconv_generic_appender, PreprocessExt, PreprocessAppender, UnwrapOptionAppender};
 use crate::level_index::LevelIndexList;
 use crate::myfrom::MyFrom;
+// Arrow export
+use arrow::array::{ArrayRef, BinaryBuilder};
+use arrow::datatypes::DataType as ArrowDataType;
 
 
 fn convert_decimal_to_bytes(d: &BigDecimal, scale: i32, precision: u32) -> Vec<u8> {
@@ -65,6 +68,17 @@ impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppenderBase for DecimalBytesAppende
 	}
 	fn max_dl(&self) -> i16 { self.inner.max_dl() }
 	fn max_rl(&self) -> i16 { self.inner.max_rl() }
+
+	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
+		match target {
+			ArrowDataType::Binary => {
+				// Leverage inner appender's Arrow export if available; otherwise build from buffered Vec<u8>
+				let arr = self.inner.to_arrow_array(target)?;
+				Ok(arr)
+			},
+			_ => Err("Arrow DECIMAL(bytes) export: unsupported target type".to_string())
+		}
+	}
 }
 
 impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppender<PgNumeric> for DecimalBytesAppender<TInner> {

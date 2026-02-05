@@ -41,6 +41,12 @@ impl<TPg, TInner> ColumnAppenderBase for BasicPgRowColumnAppender<TPg, TInner>
 	fn max_dl(&self) -> i16 { self.appender.max_dl() }
 
 	fn max_rl(&self) -> i16 { self.appender.max_rl() }
+
+	fn clear(&mut self) { self.appender.clear(); }
+
+	fn to_arrow_array(&mut self, target: &arrow::datatypes::DataType) -> Result<arrow::array::ArrayRef, String> {
+		self.appender.to_arrow_array(target)
+	}
 }
 
 impl<TPg, TAppender, TRow: PgAbstractRow + Clone> ColumnAppender<TRow> for BasicPgRowColumnAppender<TPg, TAppender>
