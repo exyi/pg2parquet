@@ -4,7 +4,7 @@ use postgres::types::FromSql;
 
 use crate::{pg_custom_types::PgAbstractRow, level_index::LevelIndexList};
 
-use super::{ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter};
+use super::{ColumnAppender, ColumnAppenderBase};
 
 
 pub struct BasicPgRowColumnAppender<TPg, TInner>
@@ -31,11 +31,6 @@ impl<TPg, TInner> ColumnAppenderBase for BasicPgRowColumnAppender<TPg, TInner>
 		// println!("write_null: level: {}, max_rl: {}", level, self.column.max_rl());
 		debug_assert_eq!(repetition_index.level, self.appender.max_rl());
 		self.appender.write_null(repetition_index, level)
-	}
-
-	fn write_columns(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		// debug_assert_eq!(column_i, self.column_i);
-		self.appender.write_columns(column_i, next_col)
 	}
 
 	fn max_dl(&self) -> i16 { self.appender.max_dl() }

@@ -4,7 +4,7 @@ use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal, BigInt};
 use bigdecimal::ToPrimitive;
 
-use crate::appenders::{GenericColumnAppender, ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter, new_autoconv_generic_appender, PreprocessExt, PreprocessAppender, UnwrapOptionAppender};
+use crate::appenders::{GenericColumnAppender, ColumnAppender, ColumnAppenderBase, new_autoconv_generic_appender, PreprocessExt, PreprocessAppender, UnwrapOptionAppender};
 use crate::level_index::LevelIndexList;
 use crate::myfrom::MyFrom;
 // Arrow export
@@ -63,9 +63,6 @@ impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppenderBase for DecimalBytesAppende
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		self.inner.write_null(repetition_index, level)
 	}
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		self.inner.write_columns(column_i, next_col)
-	}
 	fn max_dl(&self) -> i16 { self.inner.max_dl() }
 	fn max_rl(&self) -> i16 { self.inner.max_rl() }
 
@@ -110,33 +107,3 @@ impl MyFrom<PgNumeric> for f32 {
 		}
     }
 }
-
-// #[derive(Clone)]
-// struct DecimalIntAppender<TInt: TryFrom<BigInt>, TInner: ColumnAppender<i64>>
-// 	where TInt::Error: std::fmt::Display {
-// 	inner: TInner,
-// 	precision: u32,
-// 	scale: i32,
-// }
-
-// impl<TInner: ColumnAppender<i64>> ColumnAppenderBase for DecimalIntAppender<TInner> {
-// 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-// 		self.inner.write_null(repetition_index, level)
-// 	}
-// 	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-// 		self.inner.write_columns(column_i, next_col)
-// 	}
-// 	fn max_dl(&self) -> i16 { self.inner.max_dl() }
-// 	fn max_rl(&self) -> i16 { self.inner.max_rl() }
-// }
-
-// impl<TInner: ColumnAppender<i64>> ColumnAppender<PgNumeric> for DecimalIntAppender<TInner> {
-// 	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<PgNumeric>) -> Result<usize, String> {
-// 		let value = value.as_ref();
-// 		let int = match &value.n {
-// 			Some(n) => convert_decimal_to_int(n, self.scale, self.precision),
-// 			None => None,
-// 		};
-// 		self.inner.copy_value_opt(repetition_index, Cow::Owned(int))
-// 	}
-// }

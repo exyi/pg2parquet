@@ -1,6 +1,4 @@
-use std::{borrow::Cow, sync::Arc, cell::RefCell, io::Write};
-
-use parquet::file::writer::{SerializedColumnWriter, SerializedRowGroupWriter};
+use std::borrow::Cow;
 // Arrow exports: allow appenders to materialize Arrow arrays for parallel compression path
 use arrow::array::ArrayRef;
 use arrow::datatypes::DataType as ArrowDataType;
@@ -9,8 +7,6 @@ use crate::level_index::LevelIndexList;
 
 pub trait ColumnAppenderBase {
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String>;
-
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String>;
 
 	fn max_dl(&self) -> i16;
 	fn max_rl(&self) -> i16;
@@ -46,10 +42,6 @@ impl<T> ColumnAppenderBase for DynColumnAppender<T> {
         self.as_mut().write_null(repetition_index, level)
     }
 
-    fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-        self.as_mut().write_columns(column_i, next_col)
-    }
-
     fn max_dl(&self) -> i16 {
         self.as_ref().max_dl()
     }
@@ -71,32 +63,4 @@ impl<T: Clone> ColumnAppender<T> for DynColumnAppender<T> {
     fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<T>) -> Result<usize, String> {
         self.as_mut().copy_value(repetition_index, value)
     }
-}
-
-pub type Arcell<T> = Arc<RefCell<T>>;
-
-/// Helper trait for ColumnAppender to allow dynamic dispatch of creating new columns
-pub trait DynamicSerializedWriter {
-	fn next_column(&mut self, callback: &mut dyn FnMut(SerializedColumnWriter<'_>) -> ()) -> parquet::errors::Result<bool>;
-}
-struct DynamicSerializedWriterImpl<'a, W: Write + Send> {
-	writer: Arcell<Option<SerializedRowGroupWriter<'a, W>>>
-}
-impl<'a, 'b, W: Write + Send> DynamicSerializedWriter for DynamicSerializedWriterImpl<'a, W> {
-	fn next_column(&mut self, callback: &mut dyn FnMut(SerializedColumnWriter<'_>) -> ()) -> parquet::errors::Result<bool> {
-		let mut writer = self.writer.borrow_mut();
-		let writer2 = writer.as_mut().unwrap();
-		let col = writer2.next_column()?;
-		match col {
-			None => Ok(false),
-			Some(col) => {
-				callback(col);
-				Ok(true)
-			}
-		}
-	}
-}
-
-pub fn new_dynamic_serialized_writer<'a, W: Write + Send>(writer: Arcell<Option<SerializedRowGroupWriter<'a, W>>>) -> Box<dyn DynamicSerializedWriter + 'a> {
-	Box::new(DynamicSerializedWriterImpl::<'a, W> { writer })
 }

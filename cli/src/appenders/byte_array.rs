@@ -1,12 +1,10 @@
 use std::{borrow::Cow, io::Read, marker::PhantomData, sync::Arc};
 
 use byteorder::{ReadBytesExt, ByteOrder, BigEndian};
-use bytes::{Bytes, BufMut};
-use parquet::{data_type::{DataType, ByteArray, FixedLenByteArray, ByteArrayType}, file::writer::SerializedColumnWriter, errors::ParquetError};
 
 use crate::{level_index::{LevelIndexState, LevelIndexList}, myfrom::MyFrom, pg_custom_types::{PgAnyRef, PgAbstractRow}};
 
-use super::{real_memory_size::RealMemorySize, ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter};
+use super::{real_memory_size::RealMemorySize, ColumnAppenderBase, ColumnAppender};
 use arrow::array::{ArrayRef, BinaryBuilder};
 use arrow::datatypes::DataType as ArrowDataType;
 
@@ -78,72 +76,9 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 		}
 	}
 
-	fn write_column(&mut self, writer: &mut SerializedColumnWriter) -> Result<(), ParquetError> {
-		let dls = if self.max_dl > 0 { Some(self.dls.as_slice()) } else { None };
-		let rls = if self.max_rl > 0 { Some(self.rls.as_slice()) } else { None };
-
-		let writer_t = writer.typed::<ByteArrayType>();
-
-		if self.builder.offsets_slice().len() == 0 {
-			writer_t.write_batch(&[], dls, rls)?;
-			self.dls.clear();
-			self.rls.clear();
-			return Ok(());
-		}
-
-		// if self.max_rl > 0 {
-		// 	println!("Writing values: {:?}", self.column);
-		// 	println!("           RLS: {:?}", self.rls);
-		// 	println!("           DLS: {:?}", self.dls);
-		// }
-		let mut builder = BinaryBuilder::new();
-		std::mem::swap(&mut self.builder, &mut builder);
-		let built = builder.finish();
-		let byte_array = Bytes::from(built.values().to_vec());
-
-		let offsets = self.builder.offsets_slice();
-
-		let mut column: Vec<ByteArray> = vec![ByteArray::new(); offsets.len()];
-		for ((&offset, &next), out) in offsets.iter().zip(offsets.iter().skip(1)).zip(column.iter_mut()) {
-			let b = byte_array.slice((offset as usize)..(next as usize));
-			let b_array: ByteArray = ByteArray::from(b);
-			*out = b_array;
-		}
-		column[offsets.len()-1] = ByteArray::from(byte_array.slice(*offsets.last().unwrap() as usize..));
-
-		let _num_written = writer_t.write_batch(&column, dls, rls)?;
-		std::mem::drop((column, byte_array));
-		
-		self.dls.clear();
-		self.rls.clear();
-
-		Ok(())
-	}
 }
 
 impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FCopyTo> {
-
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		let mut error = None;
-		let c = next_col.next_column(&mut |mut column| {
-			let result = self.write_column(&mut column);
-			let error1 = result.err();
-			let result2 = column.close();
-
-			error = error1.or(result2.err());
-			
-		}).map_err(|e| format!("Could not create column[{}]: {}", column_i, e))?;
-
-		if error.is_some() {
-			return Err(format!("Couldn't write data of column[{}]: {}", column_i, error.unwrap()));
-		}
-
-		if !c {
-			return Err("Not enough columns".to_string());
-		}
-
-		Ok(())
-	}
 
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		Ok(self.write_null(repetition_index, level))

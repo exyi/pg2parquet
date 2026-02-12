@@ -1,12 +1,9 @@
 use std::{marker::PhantomData, sync::Arc, borrow::Cow};
 
-use byteorder::{ReadBytesExt, ByteOrder, BigEndian};
-use bytes::{Bytes, BufMut};
-use parquet::{data_type::{ByteArray, ByteArrayType, DataType, FixedLenByteArray, FixedLenByteArrayType}, errors::ParquetError, file::writer::SerializedColumnWriter};
 
 use crate::{appenders::byte_array, level_index::{LevelIndexList, LevelIndexState}, myfrom::MyFrom, pg_custom_types::{PgAbstractRow, PgAnyRef}};
 
-use super::{real_memory_size::RealMemorySize, ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter};
+use super::{real_memory_size::RealMemorySize, ColumnAppenderBase, ColumnAppender};
 
 pub struct FixedByteArrayColumnAppender<TPg, FCopyTo: Fn(&TPg, &mut [u8]) -> Option<usize>> {
 	max_dl: i16,
@@ -81,66 +78,9 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut [u8]) -> Option<usize>> FixedByteArrayColumnApp
 		}
 	}
 
-	fn write_column(&mut self, writer: &mut SerializedColumnWriter) -> Result<(), ParquetError> {
-		let dls = if self.max_dl > 0 { Some(self.dls.as_slice()) } else { None };
-		let rls = if self.max_rl > 0 { Some(self.rls.as_slice()) } else { None };
-
-		let writer_t = writer.typed::<FixedLenByteArrayType>();
-
-		if self.byte_buffer.len() == 0 {
-			assert_eq!(0, self.byte_buffer.len());
-			writer_t.write_batch(&[], dls, rls)?;
-			self.dls.clear();
-			self.rls.clear();
-			return Ok(());
-		}
-
-		let mut byte_array = Vec::new();
-		std::mem::swap(&mut self.byte_buffer, &mut byte_array);
-		let byte_array = Bytes::from(byte_array);
-
-		let mut column: Vec<FixedLenByteArray> = vec![FixedLenByteArray::default(); byte_array.len() / self.length];
-		for i in 0..column.len() {
-			let b: Bytes = byte_array.slice(i * self.length..(i + 1) * self.length);
-			column[i] = FixedLenByteArray::from(ByteArray::from(b));
-		}
-
-		let _num_written = writer_t.write_batch(&column, dls, rls)?;
-		let buffer_length = byte_array.len();
-		std::mem::drop((column, byte_array));
-		self.byte_buffer.reserve(buffer_length);
-
-		assert_eq!(0, self.byte_buffer.len());
-		self.dls.clear();
-		self.rls.clear();
-
-		Ok(())
-	}
 }
 
 impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut [u8]) -> Option<usize>> ColumnAppenderBase for FixedByteArrayColumnAppender<TPg, FCopyTo> {
-
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		let mut error = None;
-		let c = next_col.next_column(&mut |mut column| {
-			let result = self.write_column(&mut column);
-			let error1 = result.err();
-			let result2 = column.close();
-
-			error = error1.or(result2.err());
-			
-		}).map_err(|e| format!("Could not create column[{}]: {}", column_i, e))?;
-
-		if error.is_some() {
-			return Err(format!("Couldn't write data of column[{}]: {}", column_i, error.unwrap()));
-		}
-
-		if !c {
-			return Err("Not enough columns".to_string());
-		}
-
-		Ok(())
-	}
 
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		Ok(self.write_null(repetition_index, level))

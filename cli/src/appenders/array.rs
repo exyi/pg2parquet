@@ -2,7 +2,7 @@ use std::{marker::PhantomData, borrow::Cow};
 
 use crate::level_index::LevelIndexList;
 
-use super::{ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter};
+use super::{ColumnAppender, ColumnAppenderBase};
 // Arrow support for exporting LIST arrays via inner appender
 use std::sync::Arc;
 use arrow::array::{ArrayRef, ListArray, OffsetBufferBuilder, NullBufferBuilder};
@@ -75,10 +75,6 @@ impl<TPg: Clone, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner>
 		debug_assert!(self.inner.max_rl() > 0);
 		self.inner.max_rl() - 1
 	}
-
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		self.inner.write_columns(column_i, next_col)
-	}	
 
 	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
 		// Only support flat LIST where inner has max_rl = self.max_rl()+1 and we can export its values array.

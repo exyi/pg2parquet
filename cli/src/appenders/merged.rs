@@ -2,7 +2,7 @@ use std::{sync::Arc, borrow::Cow, marker::PhantomData};
 
 use crate::{level_index::LevelIndexList, myfrom::MyFrom};
 
-use super::{ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, GenericColumnAppender, DynColumnAppender};
+use super::{ColumnAppenderBase, ColumnAppender, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, GenericColumnAppender, DynColumnAppender};
 // Arrow: compose child arrays into StructArray for struct/group columns
 use arrow::array::{ArrayRef, BinaryDictionaryBuilder, StructArray};
 use arrow::datatypes::DataType as ArrowDataType;
@@ -32,13 +32,6 @@ impl<T> ColumnAppenderBase for DynamicMergedAppender<T> {
 			total += c.write_null(repetition_index, level)?;
 		}
 		Ok(total)
-	}
-
-	fn write_columns<'b>(&mut self, _column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		for (i, c) in self.columns.iter_mut().enumerate() {
-			c.write_columns(i, next_col)?;
-		}
-		Ok(())
 	}
 
 	fn max_dl(&self) -> i16 {
@@ -133,12 +126,6 @@ impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> ColumnAppe
         Ok(x + y)
     }
 
-    fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-        self.next.write_columns(column_i, next_col)?;
-        self.appender.write_columns(column_i, next_col)?;
-        Ok(())
-    }
-
     fn max_dl(&self) -> i16 {
         self.next.max_dl()
     }
@@ -173,10 +160,6 @@ impl ColumnAppenderBase for StaticMergedAppenderNil {
         Ok(0)
     }
 
-    fn write_columns<'b>(&mut self, _column_i: usize, _next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-        Ok(())
-    }
-
     fn max_dl(&self) -> i16 { self.max_dl }
 
     fn max_rl(&self) -> i16 { self.max_rl }
@@ -196,7 +179,6 @@ impl<T: Clone> StaticMergedAppender<T> for StaticMergedAppenderNil {}
 // trait StaticMergedAppenderCore<T> {
 //     fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<Arc<T>>) -> Result<usize, String>;
 //     fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String>;
-//     fn write_columns<'b>(&mut self, _column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String>;
 // }
 
 // struct StaticMergedAppenderCoreImpl<T, TNext: 

@@ -2,7 +2,7 @@ use std::{borrow::Cow, marker::PhantomData, sync::Arc};
 
 use crate::level_index::LevelIndexList;
 
-use super::{ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter};
+use super::{ColumnAppender, ColumnAppenderBase};
 
 pub struct UnwrapOptionAppender<T: Clone, Appender2: ColumnAppender<T>> {
     appender: Appender2,
@@ -16,10 +16,6 @@ impl<T: Clone, Appender2: ColumnAppender<T>> UnwrapOptionAppender<T, Appender2> 
 impl<T: Clone, Appender2: ColumnAppender<T>> ColumnAppenderBase for UnwrapOptionAppender<T, Appender2> {
     fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
         self.appender.write_null(repetition_index, level)
-    }
-
-    fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-        self.appender.write_columns(column_i, next_col)
     }
 
     fn max_dl(&self) -> i16 {
@@ -58,10 +54,6 @@ impl<T1: Clone, T2: Clone, Appender2: ColumnAppender<T2>, F: Fn(Cow<T1>) -> Cow<
 impl<T1: Clone, T2: Clone, Appender2: ColumnAppender<T2>, F: Fn(Cow<T1>) -> Cow<T2>> ColumnAppenderBase for PreprocessAppender<T1, T2, Appender2, F> {
     fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
         self.appender.write_null(repetition_index, level)
-    }
-
-    fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-        self.appender.write_columns(column_i, next_col)
     }
 
     fn max_dl(&self) -> i16 {
@@ -117,10 +109,6 @@ impl<T, TInner: ColumnAppender<Arc<T>>> RcWrapperAppender<T, TInner> {
 impl<T, TInner: ColumnAppender<Arc<T>>> ColumnAppenderBase for RcWrapperAppender<T, TInner> {
 	fn write_null(&mut self, repetition_index: &crate::level_index::LevelIndexList, level: i16) -> Result<usize, String> {
 		self.inner.write_null(repetition_index, level)
-	}
-
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn crate::appenders::DynamicSerializedWriter) -> Result<(), String> {
-		self.inner.write_columns(column_i, next_col)
 	}
 
 	fn max_dl(&self) -> i16 { self.inner.max_dl() }
