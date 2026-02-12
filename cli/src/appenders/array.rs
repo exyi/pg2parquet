@@ -5,7 +5,7 @@ use crate::level_index::LevelIndexList;
 use super::{ColumnAppender, ColumnAppenderBase};
 // Arrow support for exporting LIST arrays via inner appender
 use std::sync::Arc;
-use arrow::array::{ArrayRef, ListArray, OffsetBufferBuilder, NullBufferBuilder};
+use arrow::array::{ArrayRef, ListArray, ListBuilder, NullBufferBuilder, OffsetBufferBuilder};
 use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
 use arrow::buffer::{OffsetBuffer, NullBuffer};
 // Use arrow's compute concat to avoid bringing in extra crates

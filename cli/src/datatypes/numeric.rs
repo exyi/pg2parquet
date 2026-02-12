@@ -4,7 +4,7 @@ use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal, BigInt};
 use bigdecimal::ToPrimitive;
 
-use crate::appenders::{GenericColumnAppender, ColumnAppender, ColumnAppenderBase, new_autoconv_generic_appender, PreprocessExt, PreprocessAppender, UnwrapOptionAppender};
+use crate::appenders::{ColumnAppender, ColumnAppenderBase, new_autoconv_byte_array_binary_appender, new_autoconv_generic_appender, PreprocessExt, PreprocessAppender, UnwrapOptionAppender};
 use crate::level_index::LevelIndexList;
 use crate::myfrom::MyFrom;
 // Arrow export
@@ -31,7 +31,7 @@ pub fn convert_decimal_to_int<Int: TryFrom<BigInt>>(d: &BigDecimal, scale: i32, 
 }
 
 pub fn new_decimal_bytes_appender(max_dl: i16, max_rl: i16, precision: u32, scale: i32) -> impl ColumnAppender<PgNumeric> {
-	let inner: GenericColumnAppender<Vec<u8>, ByteArrayType, _> = new_autoconv_generic_appender(max_dl, max_rl);
+	let inner = new_autoconv_byte_array_binary_appender::<Vec<u8>>(max_dl, max_rl);
 	DecimalBytesAppender {
 		inner,
 		precision,

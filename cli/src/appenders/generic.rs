@@ -1,53 +1,134 @@
-use std::{marker::PhantomData, sync::Arc, borrow::Cow};
-use std::any::TypeId;
+use std::{borrow::Cow, marker::PhantomData, sync::Arc};
 
-use parquet::data_type::DataType;
-use parquet::data_type::{ByteArray as PqByteArray, FixedLenByteArray as PqFixedLenByteArray};
-
-use crate::{level_index::{LevelIndexState, LevelIndexList}, myfrom::MyFrom};
-
-use super::{real_memory_size::RealMemorySize, ColumnAppenderBase, ColumnAppender};
-// Arrow exports for parallel compression path
-use arrow::array::{ArrayRef, BooleanBuilder, Int32Builder, Int64Builder, Float32Builder, Float64Builder, BinaryBuilder, StringBuilder, FixedSizeBinaryBuilder};
+use arrow::array::{ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, StringBuilder};
 use arrow::datatypes::DataType as ArrowDataType;
 
+use parquet::basic;
+use parquet::data_type::{DataType, ByteArray as PqByteArray, ByteArrayType, FixedLenByteArray as PqFixedLenByteArray, FixedLenByteArrayType};
 
-pub struct GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
+use crate::{
+	level_index::{LevelIndexList, LevelIndexState},
+	myfrom::MyFrom,
+};
+
+use super::{real_memory_size::RealMemorySize, ColumnAppender, ColumnAppenderBase, DynColumnAppender};
+
+pub trait ArrowBuilderBridge: Sized {
+	type Native: Copy + RealMemorySize;
+
+	fn with_capacity(capacity: usize) -> Self;
+	fn append_value(&mut self, value: Self::Native);
+	fn append_null(&mut self);
+	fn finish(self) -> ArrayRef;
+	fn arrow_type() -> ArrowDataType;
+}
+
+macro_rules! impl_arrow_builder_bridge {
+	($builder:ty, $native:ty, $arrow_dt:expr) => {
+		impl ArrowBuilderBridge for $builder {
+			type Native = $native;
+
+			fn with_capacity(capacity: usize) -> Self {
+				<$builder>::with_capacity(capacity)
+			}
+
+			fn append_value(&mut self, value: Self::Native) {
+				self.append_value(value)
+			}
+
+			fn append_null(&mut self) {
+				self.append_null()
+			}
+
+			fn finish(mut self) -> ArrayRef {
+				Arc::new(<$builder>::finish(&mut self)) as ArrayRef
+			}
+
+			fn arrow_type() -> ArrowDataType {
+				$arrow_dt
+			}
+		}
+	};
+}
+
+impl_arrow_builder_bridge!(BooleanBuilder, bool, ArrowDataType::Boolean);
+impl_arrow_builder_bridge!(Int32Builder, i32, ArrowDataType::Int32);
+impl_arrow_builder_bridge!(Int64Builder, i64, ArrowDataType::Int64);
+impl_arrow_builder_bridge!(Float32Builder, f32, ArrowDataType::Float32);
+impl_arrow_builder_bridge!(Float64Builder, f64, ArrowDataType::Float64);
+
+pub trait PrimitiveParquetType: DataType
+	where Self::T: Copy + RealMemorySize
+{
+	type Builder: ArrowBuilderBridge<Native = Self::T>;
+}
+
+impl PrimitiveParquetType for parquet::data_type::BoolType {
+	type Builder = BooleanBuilder;
+}
+impl PrimitiveParquetType for parquet::data_type::Int32Type {
+	type Builder = Int32Builder;
+}
+impl PrimitiveParquetType for parquet::data_type::Int64Type {
+	type Builder = Int64Builder;
+}
+impl PrimitiveParquetType for parquet::data_type::FloatType {
+	type Builder = Float32Builder;
+}
+impl PrimitiveParquetType for parquet::data_type::DoubleType {
+	type Builder = Float64Builder;
+}
+
+pub struct PrimitiveColumnAppender<TPg, TPq, FConversion>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: Copy + RealMemorySize,
+		FConversion: Fn(TPg) -> TPq::T,
+{
 	max_dl: i16,
 	max_rl: i16,
-	column: Vec<TPq::T>,
+	builder: TPq::Builder,
 	dls: Vec<i16>,
 	rls: Vec<i16>,
-	dummy: PhantomData<TPg>,
-	dummy2: PhantomData<TPq>,
 	repetition_index: LevelIndexState,
 	conversion: FConversion,
+	_pg: PhantomData<TPg>,
+	_pq: PhantomData<TPq>,
 }
 
-pub fn new_autoconv_generic_appender<TPg, TPq: DataType>(
-	max_dl: i16, max_rl: i16,
-) -> GenericColumnAppender<TPg, TPq, impl Fn(TPg) -> TPq::T>
-	where TPq::T: Clone + RealMemorySize, TPq::T: MyFrom<TPg> {
-	GenericColumnAppender::new(max_dl, max_rl, |value: TPg| MyFrom::my_from(value))
+pub fn new_autoconv_generic_appender<TPg, TPq>(max_dl: i16, max_rl: i16) -> PrimitiveColumnAppender<TPg, TPq, impl Fn(TPg) -> TPq::T>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: Copy + RealMemorySize + MyFrom<TPg>,
+{
+	PrimitiveColumnAppender::new(max_dl, max_rl, |value: TPg| MyFrom::my_from(value))
 }
 
-impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
-
+impl<TPg, TPq, FConversion> PrimitiveColumnAppender<TPg, TPq, FConversion>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: Copy + RealMemorySize,
+		FConversion: Fn(TPg) -> TPq::T,
+{
 	pub fn new(max_dl: i16, max_rl: i16, conversion: FConversion) -> Self {
 		if max_dl < 0 || max_rl < 0 {
-			panic!("Cannot create {} with max_dl={}, max_rl={}", std::any::type_name::<Self>(), max_dl, max_rl);
+			panic!(
+				"Cannot create {} with max_dl={}, max_rl={}",
+				std::any::type_name::<Self>(),
+				max_dl,
+				max_rl
+			);
 		}
-		GenericColumnAppender {
-			max_dl, max_rl,
-			column: Vec::new(),
-			dummy: PhantomData,
-			dummy2: PhantomData,
+		PrimitiveColumnAppender {
+			max_dl,
+			max_rl,
+			builder: TPq::Builder::with_capacity(0),
 			dls: Vec::new(),
 			rls: Vec::new(),
 			repetition_index: LevelIndexState::new(max_rl),
 			conversion,
+			_pg: PhantomData,
+			_pq: PhantomData,
 		}
 	}
 
@@ -56,227 +137,512 @@ impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
 	}
 }
 
-impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
-
+impl<TPg, TPq, FConversion> ColumnAppenderBase for PrimitiveColumnAppender<TPg, TPq, FConversion>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: Copy + RealMemorySize,
+		FConversion: Fn(TPg) -> TPq::T,
+{
 	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		if self.max_dl == 0 {
+			return Err("Cannot write null to required column".to_string());
+		}
 		debug_assert!(level < self.max_dl);
-
-		// self.column.push(self.default.clone());
-
 		self.dls.push(level);
 		if self.max_rl > 0 {
-			// let self_ri = self.repetition_index.clone();
 			let rl = self.repetition_index.copy_and_diff(repetition_index);
-			// println!("Appending NULL with RL: {}, {:?} {:?}",  rl, self_ri, repetition_index);
 			self.rls.push(rl);
-			Ok(4)
-		} else {
-			Ok(2)
 		}
+		self.builder.append_null();
+		Ok(2 + if self.max_rl > 0 { 2 } else { 0 })
 	}
 
-	fn max_dl(&self) -> i16 { self.max_dl }
-	fn max_rl(&self) -> i16 { self.max_rl }
+	fn max_dl(&self) -> i16 {
+		self.max_dl
+	}
+
+	fn max_rl(&self) -> i16 {
+		self.max_rl
+	}
 
 	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
-		// Support both flat and repeated contexts; rows derive from definition levels when nullable
-
-        let make_nulls = self.max_dl > 0;
-        let rows = if make_nulls { self.dls.len() } else { self.column.len() };
-
-		// Helper to drive nullable iteration
-		macro_rules! build_nullable {
-			($builder:ident, $append:expr) => {{
-				let mut b = $builder::with_capacity(rows);
-				let mut val_idx = 0usize;
-				for i in 0..rows {
-					let is_valid = !make_nulls || self.dls[i] == self.max_dl;
-					if is_valid {
-						$append(&mut b, &self.column[val_idx]);
-						val_idx += 1;
-					} else {
-						b.append_null();
-					}
-				}
-				let arr = Arc::new(b.finish()) as ArrayRef;
-				// Clear buffers after building array
-				self.column.clear();
-				self.dls.clear();
-				self.rls.clear();
-				Ok(arr)
-			}};
+		let expected = <TPq::Builder as ArrowBuilderBridge>::arrow_type();
+		if target != &expected {
+			return Err(format!(
+				"Arrow export mismatch: expected {:?}, received {:?}",
+				expected,
+				target
+			));
 		}
-
-		// Dispatch based on parquet physical type carried by TPq
-		let t_id = TypeId::of::<TPq>();
-		if t_id == TypeId::of::<parquet::data_type::BoolType>() {
-			match target {
-				ArrowDataType::Boolean => {
-					return build_nullable!(BooleanBuilder, |b: &mut BooleanBuilder, v: &TPq::T| {
-						// SAFETY: when TPq == BoolType, TPq::T == bool
-						let vv = unsafe { *(v as *const _ as *const bool) };
-						b.append_value(vv);
-					});
-				}
-				_ => return Err("Arrow BOOLEAN export: unsupported target type".to_string())
-			}
-		}
-		if t_id == TypeId::of::<parquet::data_type::Int32Type>() {
-			match target {
-				ArrowDataType::Int32 => {
-					return build_nullable!(Int32Builder, |b: &mut Int32Builder, v: &TPq::T| {
-						let vv = unsafe { *(v as *const _ as *const i32) };
-						b.append_value(vv);
-					});
-				}
-				_ => return Err("Arrow INT32 export: unsupported target type".to_string())
-			}
-		}
-		if t_id == TypeId::of::<parquet::data_type::Int64Type>() {
-			match target {
-				ArrowDataType::Int64 => {
-					return build_nullable!(Int64Builder, |b: &mut Int64Builder, v: &TPq::T| {
-						let vv = unsafe { *(v as *const _ as *const i64) };
-						b.append_value(vv);
-					});
-				}
-				_ => return Err("Arrow INT64 export: unsupported target type".to_string())
-			}
-		}
-		if t_id == TypeId::of::<parquet::data_type::ByteArrayType>() {
-			match target {
-				ArrowDataType::Utf8 => {
-					let total_bytes: usize = self.column.iter().map(|v| v.real_memory_size()).sum();
-					let mut b = StringBuilder::with_capacity(rows, total_bytes);
-					let mut val_idx = 0usize;
-					for i in 0..rows {
-						let is_valid = !make_nulls || self.dls[i] == self.max_dl;
-						if is_valid {
-							let v: &PqByteArray = unsafe { &*( &self.column[val_idx] as *const _ as *const PqByteArray) };
-							let bytes = v.data();
-							match std::str::from_utf8(bytes) {
-								Ok(s) => b.append_value(s),
-								Err(_) => b.append_null(),
-							}
-							val_idx += 1;
-						} else {
-							b.append_null();
-						}
-					}
-					let arr = Arc::new(b.finish()) as ArrayRef;
-					self.column.clear(); self.dls.clear(); self.rls.clear();
-					return Ok(arr);
-				}
-				ArrowDataType::Binary => {
-					let total_bytes: usize = self.column.iter().map(|v| v.real_memory_size()).sum();
-					let mut b = BinaryBuilder::with_capacity(rows, total_bytes);
-					let mut val_idx = 0usize;
-					for i in 0..rows {
-						let is_valid = !make_nulls || self.dls[i] == self.max_dl;
-						if is_valid {
-							let v: &PqByteArray = unsafe { &*( &self.column[val_idx] as *const _ as *const PqByteArray) };
-							b.append_value(v.data());
-							val_idx += 1;
-						} else {
-							b.append_null();
-						}
-					}
-					let arr = Arc::new(b.finish()) as ArrayRef;
-					self.column.clear(); self.dls.clear(); self.rls.clear();
-					return Ok(arr);
-				}
-				_ => return Err("Arrow BYTE_ARRAY export: unsupported target type".to_string())
-			}
-		}
-		if t_id == TypeId::of::<parquet::data_type::FixedLenByteArrayType>() {
-			match target {
-				ArrowDataType::FixedSizeBinary(len) => {
-					let mut b = FixedSizeBinaryBuilder::new(*len as i32);
-					let mut val_idx = 0usize;
-					for i in 0..rows {
-						let is_valid = !make_nulls || self.dls[i] == self.max_dl;
-						if is_valid {
-							let v: &PqFixedLenByteArray = unsafe { &*( &self.column[val_idx] as *const _ as *const PqFixedLenByteArray) };
-							let bytes = v.data();
-							if bytes.len() == (*len as usize) { let _ = b.append_value(bytes); } else { let _ = b.append_null(); }
-							val_idx += 1;
-						} else { let _ = b.append_null(); }
-					}
-					let arr = Arc::new(b.finish()) as ArrayRef;
-					self.column.clear(); self.dls.clear(); self.rls.clear();
-					return Ok(arr);
-				}
-				ArrowDataType::Binary => {
-					let total_bytes: usize = self.column.iter().map(|v| v.real_memory_size()).sum();
-					let mut b = BinaryBuilder::with_capacity(rows, total_bytes);
-					let mut val_idx = 0usize;
-					for i in 0..rows {
-						let is_valid = !make_nulls || self.dls[i] == self.max_dl;
-						if is_valid { 
-							let v: &PqFixedLenByteArray = unsafe { &*( &self.column[val_idx] as *const _ as *const PqFixedLenByteArray) };
-							b.append_value(v.data());
-							val_idx += 1; 
-						} else { b.append_null(); }
-					}
-					let arr = Arc::new(b.finish()) as ArrayRef;
-					self.column.clear(); self.dls.clear(); self.rls.clear();
-					return Ok(arr);
-				}
-				_ => return Err("Arrow FIXED_LEN_BYTE_ARRAY export: unsupported target type".to_string())
-			}
-		}
-		if t_id == TypeId::of::<parquet::data_type::FloatType>() {
-			match target {
-				ArrowDataType::Float32 => {
-					return build_nullable!(Float32Builder, |b: &mut Float32Builder, v: &TPq::T| {
-						let vv = unsafe { *(v as *const _ as *const f32) };
-						b.append_value(vv);
-					});
-				}
-				_ => return Err("Arrow FLOAT export: unsupported target type".to_string())
-			}
-		}
-		if t_id == TypeId::of::<parquet::data_type::DoubleType>() {
-			match target {
-				ArrowDataType::Float64 => {
-					return build_nullable!(Float64Builder, |b: &mut Float64Builder, v: &TPq::T| {
-						let vv = unsafe { *(v as *const _ as *const f64) };
-						b.append_value(vv);
-					});
-				}
-				_ => return Err("Arrow DOUBLE export: unsupported target type".to_string())
-			}
-		}
-		Err("Arrow export: unsupported parquet physical type".to_string())
+		let builder = std::mem::replace(&mut self.builder, TPq::Builder::with_capacity(0));
+		let array = builder.finish();
+		self.dls.clear();
+		self.rls.clear();
+		Ok(array)
 	}
 
-
 	fn clear(&mut self) {
-		self.column.clear();
+		self.builder = TPq::Builder::with_capacity(0);
 		self.dls.clear();
 		self.rls.clear();
 	}
-
-	// to_arrow_array: not implemented here; defaults to None
 }
 
-impl<TPg: Clone, TPq, FConversion> ColumnAppender<TPg> for GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
+impl<TPg: Clone, TPq, FConversion> ColumnAppender<TPg> for PrimitiveColumnAppender<TPg, TPq, FConversion>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: Copy + RealMemorySize,
+		FConversion: Fn(TPg) -> TPq::T,
+{
 	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
 		let pq_value = self.convert(value.into_owned());
 		let byte_size = pq_value.real_memory_size();
-		self.column.push(pq_value);
+		self.builder.append_value(pq_value);
 		if self.max_dl > 0 {
 			self.dls.push(self.max_dl);
 		}
 		if self.max_rl > 0 {
-			// let self_ri = self.repetition_index.clone();
 			let rl = self.repetition_index.copy_and_diff(repetition_index);
-
-			// println!("Appending {:?} with RL: {}, {:?} {:?}", self.column.last().unwrap(),  rl, self_ri, repetition_index);
 			self.rls.push(rl);
 		}
 		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
 	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryArrowExport {
+	Binary,
+	Utf8,
+	FixedSizeBinary(i32),
+}
+
+pub struct ByteArrayBinaryColumnAppender<TPg, FConversion>
+	where
+		TPg: Clone,
+		FConversion: Fn(TPg) -> PqByteArray,
+{
+	max_dl: i16,
+	max_rl: i16,
+	builder: BinaryBuilder,
+	dls: Vec<i16>,
+	rls: Vec<i16>,
+	repetition_index: LevelIndexState,
+	conversion: FConversion,
+	_pg: PhantomData<TPg>,
+}
+
+impl<TPg, FConversion> ByteArrayBinaryColumnAppender<TPg, FConversion>
+	where
+		TPg: Clone,
+		FConversion: Fn(TPg) -> PqByteArray,
+{
+	pub fn new(max_dl: i16, max_rl: i16, conversion: FConversion) -> Self {
+		if max_dl < 0 || max_rl < 0 {
+			panic!(
+				"Cannot create {} with max_dl={}, max_rl={}",
+				std::any::type_name::<Self>(),
+				max_dl,
+				max_rl
+			);
+		}
+		Self {
+			max_dl,
+			max_rl,
+			builder: BinaryBuilder::new(),
+			dls: Vec::new(),
+			rls: Vec::new(),
+			repetition_index: LevelIndexState::new(max_rl),
+			conversion,
+			_pg: PhantomData,
+		}
+	}
+
+	fn convert(&self, value: TPg) -> PqByteArray {
+		(self.conversion)(value)
+	}
+}
+
+impl<TPg: Clone, FConversion> ColumnAppenderBase for ByteArrayBinaryColumnAppender<TPg, FConversion>
+	where
+		FConversion: Fn(TPg) -> PqByteArray,
+{
+	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		if self.max_dl == 0 {
+			return Err("Cannot write null to required column".to_string());
+		}
+		debug_assert!(level < self.max_dl);
+		self.dls.push(level);
+		if self.max_rl > 0 {
+			let rl = self.repetition_index.copy_and_diff(repetition_index);
+			self.rls.push(rl);
+		}
+		self.builder.append_null();
+		Ok(2 + if self.max_rl > 0 { 2 } else { 0 })
+	}
+
+	fn max_dl(&self) -> i16 { self.max_dl }
+
+	fn max_rl(&self) -> i16 { self.max_rl }
+
+	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
+		if target != &ArrowDataType::Binary {
+			return Err("Arrow BYTE_ARRAY export: expected Binary".to_string());
+		}
+		let mut builder = std::mem::replace(&mut self.builder, BinaryBuilder::new());
+		let array = Arc::new(builder.finish()) as ArrayRef;
+		self.dls.clear();
+		self.rls.clear();
+		Ok(array)
+	}
+
+	fn clear(&mut self) {
+		self.builder = BinaryBuilder::new();
+		self.dls.clear();
+		self.rls.clear();
+	}
+}
+
+impl<TPg: Clone, FConversion> ColumnAppender<TPg> for ByteArrayBinaryColumnAppender<TPg, FConversion>
+	where
+		FConversion: Fn(TPg) -> PqByteArray,
+{
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
+		let pq_value = self.convert(value.into_owned());
+		let byte_size = pq_value.real_memory_size();
+		self.builder.append_value(pq_value.data());
+		if self.max_dl > 0 {
+			self.dls.push(self.max_dl);
+		}
+		if self.max_rl > 0 {
+			let rl = self.repetition_index.copy_and_diff(repetition_index);
+			self.rls.push(rl);
+		}
+		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
+	}
+}
+
+pub struct ByteArrayUtf8ColumnAppender<TPg, FConversion>
+	where
+		TPg: Clone,
+		FConversion: Fn(TPg) -> PqByteArray,
+{
+	max_dl: i16,
+	max_rl: i16,
+	builder: StringBuilder,
+	dls: Vec<i16>,
+	rls: Vec<i16>,
+	repetition_index: LevelIndexState,
+	conversion: FConversion,
+	_pg: PhantomData<TPg>,
+}
+
+impl<TPg, FConversion> ByteArrayUtf8ColumnAppender<TPg, FConversion>
+	where
+		TPg: Clone,
+		FConversion: Fn(TPg) -> PqByteArray,
+{
+	pub fn new(max_dl: i16, max_rl: i16, conversion: FConversion) -> Self {
+		if max_dl < 0 || max_rl < 0 {
+			panic!(
+				"Cannot create {} with max_dl={}, max_rl={}",
+				std::any::type_name::<Self>(),
+				max_dl,
+				max_rl
+			);
+		}
+		Self {
+			max_dl,
+			max_rl,
+			builder: StringBuilder::new(),
+			dls: Vec::new(),
+			rls: Vec::new(),
+			repetition_index: LevelIndexState::new(max_rl),
+			conversion,
+			_pg: PhantomData,
+		}
+	}
+
+	fn convert(&self, value: TPg) -> PqByteArray {
+		(self.conversion)(value)
+	}
+}
+
+impl<TPg: Clone, FConversion> ColumnAppenderBase for ByteArrayUtf8ColumnAppender<TPg, FConversion>
+	where
+		FConversion: Fn(TPg) -> PqByteArray,
+{
+	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		if self.max_dl == 0 {
+			return Err("Cannot write null to required column".to_string());
+		}
+		debug_assert!(level < self.max_dl);
+		self.dls.push(level);
+		if self.max_rl > 0 {
+			let rl = self.repetition_index.copy_and_diff(repetition_index);
+			self.rls.push(rl);
+		}
+		self.builder.append_null();
+		Ok(2 + if self.max_rl > 0 { 2 } else { 0 })
+	}
+
+	fn max_dl(&self) -> i16 { self.max_dl }
+
+	fn max_rl(&self) -> i16 { self.max_rl }
+
+	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
+		if target != &ArrowDataType::Utf8 {
+			return Err("Arrow BYTE_ARRAY export: expected Utf8".to_string());
+		}
+		let mut builder = std::mem::replace(&mut self.builder, StringBuilder::new());
+		let array = Arc::new(builder.finish()) as ArrayRef;
+		self.dls.clear();
+		self.rls.clear();
+		Ok(array)
+	}
+
+	fn clear(&mut self) {
+		self.builder = StringBuilder::new();
+		self.dls.clear();
+		self.rls.clear();
+	}
+}
+
+impl<TPg: Clone, FConversion> ColumnAppender<TPg> for ByteArrayUtf8ColumnAppender<TPg, FConversion>
+	where
+		FConversion: Fn(TPg) -> PqByteArray,
+{
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
+		let pq_value = self.convert(value.into_owned());
+		let byte_size = pq_value.real_memory_size();
+		match std::str::from_utf8(pq_value.data()) {
+			Ok(s) => {
+				self.builder.append_value(s);
+				if self.max_dl > 0 {
+					self.dls.push(self.max_dl);
+				}
+			}
+			Err(_) => {
+				if self.max_dl == 0 {
+					return Err("Invalid UTF-8 in required column".to_string());
+				}
+				self.builder.append_null();
+				self.dls.push(self.max_dl - 1);
+			}
+		}
+		if self.max_rl > 0 {
+			let rl = self.repetition_index.copy_and_diff(repetition_index);
+			self.rls.push(rl);
+		}
+		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
+	}
+}
+
+pub struct FixedLenBinaryColumnAppender<TPg, FConversion>
+	where
+		TPg: Clone,
+		FConversion: Fn(TPg) -> PqFixedLenByteArray,
+{
+	max_dl: i16,
+	max_rl: i16,
+	len: i32,
+	builder: FixedSizeBinaryBuilder,
+	dls: Vec<i16>,
+	rls: Vec<i16>,
+	repetition_index: LevelIndexState,
+	conversion: FConversion,
+	_pg: PhantomData<TPg>,
+}
+
+impl<TPg, FConversion> FixedLenBinaryColumnAppender<TPg, FConversion>
+	where
+		TPg: Clone,
+		FConversion: Fn(TPg) -> PqFixedLenByteArray,
+{
+	pub fn new(max_dl: i16, max_rl: i16, len: i32, conversion: FConversion) -> Self {
+		if max_dl < 0 || max_rl < 0 {
+			panic!(
+				"Cannot create {} with max_dl={}, max_rl={}",
+				std::any::type_name::<Self>(),
+				max_dl,
+				max_rl
+			);
+		}
+		Self {
+			max_dl,
+			max_rl,
+			len,
+			builder: FixedSizeBinaryBuilder::new(len),
+			dls: Vec::new(),
+			rls: Vec::new(),
+			repetition_index: LevelIndexState::new(max_rl),
+			conversion,
+			_pg: PhantomData,
+		}
+	}
+
+	fn convert(&self, value: TPg) -> PqFixedLenByteArray {
+		(self.conversion)(value)
+	}
+}
+
+impl<TPg: Clone, FConversion> ColumnAppenderBase for FixedLenBinaryColumnAppender<TPg, FConversion>
+	where
+		FConversion: Fn(TPg) -> PqFixedLenByteArray,
+{
+	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+		if self.max_dl == 0 {
+			return Err("Cannot write null to required column".to_string());
+		}
+		debug_assert!(level < self.max_dl);
+		self.dls.push(level);
+		if self.max_rl > 0 {
+			let rl = self.repetition_index.copy_and_diff(repetition_index);
+			self.rls.push(rl);
+		}
+		self.builder.append_null();
+		Ok(2 + if self.max_rl > 0 { 2 } else { 0 })
+	}
+
+	fn max_dl(&self) -> i16 { self.max_dl }
+
+	fn max_rl(&self) -> i16 { self.max_rl }
+
+	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
+		if target != &ArrowDataType::FixedSizeBinary(self.len) {
+			return Err("Arrow FIXED_LEN_BYTE_ARRAY export: expected FixedSizeBinary".to_string());
+		}
+		let mut builder = std::mem::replace(&mut self.builder, FixedSizeBinaryBuilder::new(self.len));
+		let array = Arc::new(builder.finish()) as ArrayRef;
+		self.dls.clear();
+		self.rls.clear();
+		Ok(array)
+	}
+
+	fn clear(&mut self) {
+		self.builder = FixedSizeBinaryBuilder::new(self.len);
+		self.dls.clear();
+		self.rls.clear();
+	}
+}
+
+impl<TPg: Clone, FConversion> ColumnAppender<TPg> for FixedLenBinaryColumnAppender<TPg, FConversion>
+	where
+		FConversion: Fn(TPg) -> PqFixedLenByteArray,
+{
+	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
+		let pq_value = self.convert(value.into_owned());
+		let byte_size = pq_value.real_memory_size();
+		let bytes = pq_value.data();
+		if bytes.len() != self.len as usize {
+			if self.max_dl == 0 {
+				return Err("FixedLenBinary value has wrong length".to_string());
+			}
+			self.builder.append_null();
+			self.dls.push(self.max_dl - 1);
+		} else {
+			let _ = self.builder.append_value(bytes);
+			if self.max_dl > 0 {
+				self.dls.push(self.max_dl);
+			}
+		}
+		if self.max_rl > 0 {
+			let rl = self.repetition_index.copy_and_diff(repetition_index);
+			self.rls.push(rl);
+		}
+		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
+	}
+}
+
+pub fn new_autoconv_byte_array_binary_appender<TPg>(max_dl: i16, max_rl: i16) -> ByteArrayBinaryColumnAppender<TPg, impl Fn(TPg) -> PqByteArray>
+	where
+		TPg: Clone,
+		PqByteArray: MyFrom<TPg>,
+{
+	ByteArrayBinaryColumnAppender::new(max_dl, max_rl, |value: TPg| MyFrom::my_from(value))
+}
+
+pub fn new_autoconv_byte_array_utf8_appender<TPg>(max_dl: i16, max_rl: i16) -> ByteArrayUtf8ColumnAppender<TPg, impl Fn(TPg) -> PqByteArray>
+	where
+		TPg: Clone,
+		PqByteArray: MyFrom<TPg>,
+{
+	ByteArrayUtf8ColumnAppender::new(max_dl, max_rl, |value: TPg| MyFrom::my_from(value))
+}
+
+pub fn new_autoconv_fixed_len_binary_appender<TPg>(max_dl: i16, max_rl: i16, len: i32) -> FixedLenBinaryColumnAppender<TPg, impl Fn(TPg) -> PqFixedLenByteArray>
+	where
+		TPg: Clone,
+		PqFixedLenByteArray: MyFrom<TPg>,
+{
+	FixedLenBinaryColumnAppender::new(max_dl, max_rl, len, |value: TPg| MyFrom::my_from(value))
+}
+
+pub trait BinaryAppenderFactory<TPg: Clone>: DataType {
+	fn build_appender<FConversion>(
+		max_dl: i16,
+		max_rl: i16,
+		conversion: FConversion,
+		arrow: BinaryArrowExport,
+	) -> Result<DynColumnAppender<TPg>, String>
+	where
+		FConversion: Fn(TPg) -> Self::T + 'static;
+}
+
+impl<TPg: Clone + 'static> BinaryAppenderFactory<TPg> for ByteArrayType {
+	fn build_appender<FConversion>(
+		max_dl: i16,
+		max_rl: i16,
+		conversion: FConversion,
+		arrow: BinaryArrowExport,
+	) -> Result<DynColumnAppender<TPg>, String>
+	where
+		FConversion: Fn(TPg) -> PqByteArray + 'static,
+	{
+		match arrow {
+			BinaryArrowExport::Binary => {
+				let conv = conversion;
+				Ok(Box::new(ByteArrayBinaryColumnAppender::new(max_dl, max_rl, conv)) as DynColumnAppender<TPg>)
+			}
+			BinaryArrowExport::Utf8 => {
+				let conv = conversion;
+				Ok(Box::new(ByteArrayUtf8ColumnAppender::new(max_dl, max_rl, conv)) as DynColumnAppender<TPg>)
+			}
+			BinaryArrowExport::FixedSizeBinary(_) => Err("Cannot export BYTE_ARRAY as FixedSizeBinary".to_string()),
+		}
+	}
+}
+
+impl<TPg: Clone + 'static> BinaryAppenderFactory<TPg> for FixedLenByteArrayType {
+	fn build_appender<FConversion>(
+		max_dl: i16,
+		max_rl: i16,
+		conversion: FConversion,
+		arrow: BinaryArrowExport,
+	) -> Result<DynColumnAppender<TPg>, String>
+	where
+		FConversion: Fn(TPg) -> PqFixedLenByteArray + 'static,
+	{
+		match arrow {
+			BinaryArrowExport::FixedSizeBinary(len) => {
+				let conv = conversion;
+				Ok(Box::new(FixedLenBinaryColumnAppender::new(max_dl, max_rl, len, conv)) as DynColumnAppender<TPg>)
+			}
+			_ => Err("FIXED_LEN_BYTE_ARRAY export requires FixedSizeBinary target".to_string()),
+		}
+	}
+}
+
+pub fn new_binary_value_appender<TPg, TPq, FConversion>(
+	max_dl: i16,
+	max_rl: i16,
+	conversion: FConversion,
+	arrow: BinaryArrowExport,
+) -> Result<DynColumnAppender<TPg>, String>
+	where
+		TPg: Clone + 'static,
+		TPq: BinaryAppenderFactory<TPg>,
+		TPq::T: RealMemorySize,
+		FConversion: Fn(TPg) -> TPq::T + 'static,
+{
+	<TPq as BinaryAppenderFactory<TPg>>::build_appender(max_dl, max_rl, conversion, arrow)
 }

@@ -23,13 +23,13 @@ use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{GroupTypeBuilder, PrimitiveTypeBuilder, Type as ParquetType, TypePtr};
 use half::f16;
 use arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField, DataType as ArrowDataType, TimeUnit};
-use arrow::array::{ArrayRef, Int16Builder, Int32Builder, Int64Builder, Float32Builder, Float64Builder, BooleanBuilder, BinaryBuilder, StringBuilder, UInt32Builder, FixedSizeBinaryBuilder};
+use arrow::array::ArrayRef;
 use arrow::record_batch::RecordBatch;
 
 use crate::datatypes::array::{PgMultidimArray, PgMultidimArrayLowerBounds};
 use crate::datatypes::pgvector::{self, PgSparseVector};
 use crate::PostgresConnArgs;
-use crate::appenders::{new_autoconv_generic_appender, new_static_merged_appender, ArrayColumnAppender, BasicPgRowColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, GenericColumnAppender, PreprocessAppender, PreprocessExt, RcWrapperAppender, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender};
+use crate::appenders::{new_autoconv_generic_appender, new_binary_value_appender, new_static_merged_appender, ArrayColumnAppender, BasicPgRowColumnAppender, BinaryAppenderFactory, BinaryArrowExport, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, PrimitiveColumnAppender, PrimitiveParquetType, PreprocessAppender, PreprocessExt, RcWrapperAppender, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
@@ -330,6 +330,7 @@ pub fn execute_copy(
 			match p {
 				ParquetType::PrimitiveType { basic_info, physical_type, type_length, .. } => {
 					let nullable = basic_info.repetition() != Repetition::REQUIRED;
+					let logical = basic_info.logical_type();
 					let dt = match physical_type {
 						basic::Type::BOOLEAN => ArrowDataType::Boolean,
 						basic::Type::INT32 => ArrowDataType::Int32,
@@ -337,7 +338,13 @@ pub fn execute_copy(
 						basic::Type::INT96 => panic!(),
 						basic::Type::FLOAT => ArrowDataType::Float32,
 						basic::Type::DOUBLE => ArrowDataType::Float64,
-						basic::Type::BYTE_ARRAY => ArrowDataType::Binary,
+						basic::Type::BYTE_ARRAY => {
+							if logical_type_requests_utf8(logical.as_ref()) {
+								ArrowDataType::Utf8
+							} else {
+								ArrowDataType::Binary
+							}
+						}
 						basic::Type::FIXED_LEN_BYTE_ARRAY => {
 							// Preserve fixed size for Arrow so special logical types (e.g., INTERVAL 12 bytes, UUID 16) round-trip correctly
 							ArrowDataType::FixedSizeBinary(*type_length)
@@ -587,9 +594,9 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 					))
 				},
 				SchemaSettingsEnumHandling::Text =>
-					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, Some(LogicalType::Enum), None)),
+					Ok(resolve_binary::<PgEnum, ByteArrayType, _>(c.col_name(), c, Some(LogicalType::Enum), None)),
 				SchemaSettingsEnumHandling::PlainText =>
-					Ok(resolve_primitive::<PgEnum, ByteArrayType, _>(c.col_name(), c, Some(LogicalType::String), None)),
+					Ok(resolve_binary::<PgEnum, ByteArrayType, _>(c.col_name(), c, Some(LogicalType::String), None)),
 			}
 		Kind::Array(ref element_type) => {
 			let list_column = c.nest("list", 0).as_array();
@@ -778,13 +785,13 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		},
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, Some(LogicalType::Integer { bit_width: 8, is_signed: false }), None),
-		"bytea" => resolve_primitive::<Vec<u8>, ByteArrayType, _>(name, c, None, None),
+		"bytea" => resolve_binary::<Vec<u8>, ByteArrayType, _>(name, c, None, None),
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
-			resolve_primitive::<String, ByteArrayType, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8)),
+			resolve_binary::<String, ByteArrayType, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8)),
 			// (Box::new(crate::appenders::byte_array::create_pg_raw_appender(c.definition_level + 1, c.repetition_level, c.col_i)),
 			// 	ParquetType::primitive_type_builder(name, basic::Type::BYTE_ARRAY).with_logical_type(Some(LogicalType::String)).with_converted_type(ConvertedType::UTF8).build().unwrap()),
 		"jsonb" | "json" =>
-			resolve_primitive::<PgRawJsonb, ByteArrayType, _>(name, c, Some(match s.json_handling {
+			resolve_binary::<PgRawJsonb, ByteArrayType, _>(name, c, Some(match s.json_handling {
 				SchemaSettingsJsonHandling::Text => LogicalType::String,
 				SchemaSettingsJsonHandling::TextMarkedAsJson => LogicalType::Json
 			}), None),
@@ -798,26 +805,26 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 			resolve_primitive::<chrono::NaiveTime, Int64Type, _>(name, c, Some(LogicalType::Time { is_adjusted_to_u_t_c: false, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
 
 		"uuid" =>
-			resolve_primitive_conv::<uuid::Uuid, FixedLenByteArrayType, _, _>(name, c, Some(16), Some(LogicalType::Uuid), None, |v| MyFrom::my_from(v)),
+			resolve_binary_conv::<uuid::Uuid, FixedLenByteArrayType, _, _>(name, c, Some(16), Some(LogicalType::Uuid), None, |v| MyFrom::my_from(v)),
 
 		"macaddr" =>
 			match s.macaddr_handling {
 				SchemaSettingsMacaddrHandling::Text =>
-					resolve_primitive::<eui48::MacAddress, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
+					resolve_binary::<eui48::MacAddress, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
 				SchemaSettingsMacaddrHandling::ByteArray =>
-					resolve_primitive_conv::<eui48::MacAddress, FixedLenByteArrayType, _, _>(name, c, Some(6), None, None, |v| MyFrom::my_from(v)),
+					resolve_binary_conv::<eui48::MacAddress, FixedLenByteArrayType, _, _>(name, c, Some(6), None, None, |v| MyFrom::my_from(v)),
 				SchemaSettingsMacaddrHandling::Int64 =>
 					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, None, None),
 			},
 		"inet" =>
-			resolve_primitive::<IpAddr, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
+			resolve_binary::<IpAddr, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
 		"bit" | "varbit" =>
-			resolve_primitive::<bit_vec::BitVec, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
+			resolve_binary::<bit_vec::BitVec, ByteArrayType, _>(name, c, Some(LogicalType::String), None),
 
 		"interval" =>
 			match s.interval_handling {
 				SchemaSettingsIntervalHandling::Interval =>
-					resolve_primitive_conv::<PgInterval, FixedLenByteArrayType, _, _>(name, c, Some(12), None, Some(ConvertedType::INTERVAL), |v| MyFrom::my_from(v)),
+					resolve_binary_conv::<PgInterval, FixedLenByteArrayType, _, _>(name, c, Some(12), None, Some(ConvertedType::INTERVAL), |v| MyFrom::my_from(v)),
 				SchemaSettingsIntervalHandling::Struct => {
 					let t = GroupTypeBuilder::new(c.col_name())
 						.with_repetition(Repetition::OPTIONAL)
@@ -847,7 +854,7 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		"vector" => resolve_vector_conv::<pgvector::PgF32Vector, f32, FloatType, _, TRow>(name, c, None, None, None, |v| v),
 		"halfvec" => match s.float16_handling {
 			SchemaSettingsFloat16Handling::Float16 =>
-				resolve_vector_conv::<pgvector::PgF16Vector, f16, FixedLenByteArrayType, _, TRow>(name, c, Some(2), Some(LogicalType::Float16), None, |v|
+				resolve_vector_binary_conv::<pgvector::PgF16Vector, f16, FixedLenByteArrayType, _, TRow>(name, c, Some(2), Some(LogicalType::Float16), None, |v|
 					FixedLenByteArray::from(ByteArray::from(v.to_le_bytes().to_vec()))),
 			SchemaSettingsFloat16Handling::Float32 =>
 				resolve_vector_conv::<pgvector::PgF16Vector, f16, FloatType, _, TRow>(name, c, None, None, None, |v| v.into())
@@ -855,8 +862,8 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		"sparsevec" => {
 			let inner_appender = new_static_merged_appender::<(i32, f32)>(c.definition_level + 2, c.repetition_level + 1)
 				// index+1, because pgvector uses 0-based in binary, but 1-based in text and operators 
-				.add_appender(GenericColumnAppender::<_, Int32Type, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.0 + 1))
-				.add_appender(GenericColumnAppender::<_, FloatType, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.1));
+				.add_appender(PrimitiveColumnAppender::<_, Int32Type, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.0 + 1))
+				.add_appender(PrimitiveColumnAppender::<_, FloatType, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.1));
 
 			let schema = ParquetType::group_type_builder(name)
 				.with_repetition(Repetition::OPTIONAL)
@@ -921,7 +928,7 @@ fn resolve_numeric<TRow: PgAbstractRow + Clone + 'static>(s: &SchemaSettings, na
 		SchemaSettingsNumericHandling::Float32 =>
 			Ok(resolve_primitive::<PgNumeric, FloatType, _>(name, c, None, None)),
 		SchemaSettingsNumericHandling::String =>
-			Ok(resolve_primitive_conv::<PgNumeric, ByteArrayType, _, _>(name, c, None, Some(LogicalType::String), None, |v: PgNumeric| match v.n {
+			Ok(resolve_binary_conv::<PgNumeric, ByteArrayType, _, _>(name, c, None, Some(LogicalType::String), None, |v: PgNumeric| match v.n {
 				Some(n) => ByteArray::my_from(n.to_string()),
 				None => ByteArray::my_from("NaN".to_string())
 			}))
@@ -934,7 +941,7 @@ fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, TRow: 
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>
 ) -> ResolvedColumn<TRow>
-	where TDataType: DataType, TDataType::T : RealMemorySize + MyFrom<T> {
+	where TDataType: PrimitiveParquetType, TDataType::T : Copy + RealMemorySize + MyFrom<T> {
 	resolve_primitive_conv::<T, TDataType, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v))
 }
 
@@ -946,7 +953,7 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, F
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
 ) -> ResolvedColumn<TRow>
-	where TDataType: DataType, TDataType::T : RealMemorySize {
+	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize {
 	let mut c = c.clone();
 	c.definition_level += 1; // TODO: can we support NOT NULL fields?
 	let t =
@@ -957,6 +964,58 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, F
 	(Box::new(cp), t)
 }
 
+fn logical_type_requests_utf8(logical_type: Option<&LogicalType>) -> bool {
+	matches!(logical_type, Some(LogicalType::String) | Some(LogicalType::Enum) | Some(LogicalType::Json))
+}
+
+fn binary_arrow_export_for<TDataType: DataType>(length: Option<i32>, logical_type: Option<&LogicalType>) -> Result<BinaryArrowExport, String> {
+	match TDataType::get_physical_type() {
+		basic::Type::BYTE_ARRAY => {
+			if logical_type_requests_utf8(logical_type) {
+				Ok(BinaryArrowExport::Utf8)
+			} else {
+				Ok(BinaryArrowExport::Binary)
+			}
+		}
+		basic::Type::FIXED_LEN_BYTE_ARRAY => {
+			let len = length.ok_or_else(|| "FIXED_LEN_BYTE_ARRAY requires a length".to_string())?;
+			Ok(BinaryArrowExport::FixedSizeBinary(len))
+		}
+		other => Err(format!("Unsupported binary physical type: {:?}", other)),
+	}
+}
+
+fn resolve_binary<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + Clone + 'static>(
+	name: &str,
+	c: &ColumnInfo,
+	logical_type: Option<LogicalType>,
+	conv_type: Option<ConvertedType>
+) -> ResolvedColumn<TRow>
+	where TDataType: DataType + BinaryAppenderFactory<T>, TDataType::T : RealMemorySize + MyFrom<T> {
+	resolve_binary_conv::<T, TDataType, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v))
+}
+
+fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone + 'static>(
+	name: &str,
+	c: &ColumnInfo,
+	length: Option<i32>,
+	logical_type: Option<LogicalType>,
+	conv_type: Option<ConvertedType>,
+	convert: FConversion
+) -> ResolvedColumn<TRow>
+	where TDataType: DataType + BinaryAppenderFactory<T>, TDataType::T : RealMemorySize {
+	let mut c = c.clone();
+	c.definition_level += 1;
+	let arrow = binary_arrow_export_for::<TDataType>(length, logical_type.as_ref())
+		.unwrap_or_else(|err| panic!("Failed to configure binary column {}: {}", c.full_name(), err));
+	let t =
+		build_primitive_pq_type(name, TDataType::get_physical_type(), length, logical_type, conv_type)
+		.build().unwrap();
+
+	let cp = create_binary_appender::<T, TDataType, _, _>(&c, convert, arrow);
+	(cp, t)
+}
+
 fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> + 'static, T: Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone + 'static>(
 	name: &str,
 	c: &ColumnInfo,
@@ -965,7 +1024,7 @@ fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> 
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
 ) -> ResolvedColumn<TRow>
-	where TDataType: DataType, TDataType::T : RealMemorySize {
+	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize {
 
 	let mut c = c.clone();
 	c.definition_level += 1; // TODO: NOT NULL fields
@@ -976,7 +1035,36 @@ fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> 
 
 	let arr_t = make_list_schema(name, Repetition::OPTIONAL, t);
 
-	let inner_appender = GenericColumnAppender::<T, TDataType, FConversion>::new(c.definition_level + 1, c.repetition_level + 1, convert);
+	let inner_appender = PrimitiveColumnAppender::<T, TDataType, FConversion>::new(c.definition_level + 1, c.repetition_level + 1, convert);
+	let array_appender = ArrayColumnAppender::new(inner_appender, true, false, c.definition_level, c.repetition_level);
+
+	let cp = wrap_pg_row_reader::<TRow, TArr>(&c, array_appender);
+	(Box::new(cp), arr_t)
+}
+
+fn resolve_vector_binary_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> + 'static, T: Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone + 'static>(
+	name: &str,
+	c: &ColumnInfo,
+	length: Option<i32>,
+	logical_type: Option<LogicalType>,
+	conv_type: Option<ConvertedType>,
+	convert: FConversion
+) -> ResolvedColumn<TRow>
+	where TDataType: DataType + BinaryAppenderFactory<T>, TDataType::T: RealMemorySize {
+
+	let mut c = c.clone();
+	c.definition_level += 1;
+	let arrow = binary_arrow_export_for::<TDataType>(length, logical_type.as_ref())
+		.unwrap_or_else(|err| panic!("Failed to configure binary array column {}: {}", c.full_name(), err));
+	let t =
+		build_primitive_pq_type("element", TDataType::get_physical_type(), length, logical_type, conv_type)
+		.with_repetition(Repetition::REQUIRED)
+		.build().unwrap();
+
+	let arr_t = make_list_schema(name, Repetition::OPTIONAL, t);
+
+	let inner_appender = new_binary_value_appender::<T, TDataType, _>(c.definition_level + 1, c.repetition_level + 1, convert, arrow)
+		.unwrap_or_else(|err| panic!("Failed to build binary array appender for {}: {}", c.full_name(), err));
 	let array_appender = ArrayColumnAppender::new(inner_appender, true, false, c.definition_level, c.repetition_level);
 
 	let cp = wrap_pg_row_reader::<TRow, TArr>(&c, array_appender);
@@ -1008,7 +1096,7 @@ fn build_primitive_pq_type(name: &'_ str, data_type: parquet::basic::Type, lengt
 fn create_primitive_appender_simple<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + Clone + 'static>(
 	c: &ColumnInfo,
 ) -> DynColumnAppender<TRow>
-	where TDataType: DataType, TDataType::T: RealMemorySize + MyFrom<T> {
+	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize + MyFrom<T> {
 	let mut c = c.clone();
 	c.definition_level += 1;
 	Box::new(create_primitive_appender::<T, TDataType, _, TRow>(&c, |x| TDataType::T::my_from(x)))
@@ -1018,9 +1106,20 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + Clone + 'static, TDataTyp
 	c: &ColumnInfo,
 	convert: FConversion
 ) -> impl ColumnAppender<TRow>
-	where TDataType: DataType, TDataType::T: RealMemorySize {
-	let basic_appender: GenericColumnAppender<T, TDataType, _> = GenericColumnAppender::new(c.definition_level, c.repetition_level, convert);
+	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize {
+	let basic_appender: PrimitiveColumnAppender<T, TDataType, _> = PrimitiveColumnAppender::new(c.definition_level, c.repetition_level, convert);
 	wrap_pg_row_reader(c, basic_appender)
+}
+
+fn create_binary_appender<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone + 'static>(
+	c: &ColumnInfo,
+	convert: FConversion,
+	arrow: BinaryArrowExport,
+) -> DynColumnAppender<TRow>
+	where TDataType: DataType + BinaryAppenderFactory<T>, TDataType::T: RealMemorySize {
+	let inner = new_binary_value_appender::<T, TDataType, _>(c.definition_level, c.repetition_level, convert, arrow)
+		.unwrap_or_else(|err| panic!("Failed to build binary appender for {}: {}", c.full_name(), err));
+	Box::new(wrap_pg_row_reader(c, inner))
 }
 
 fn create_complex_appender<T: for <'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo, columns: Vec<DynColumnAppender<Arc<T>>>) -> impl ColumnAppender<TRow> {

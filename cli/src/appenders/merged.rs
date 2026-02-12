@@ -2,7 +2,7 @@ use std::{sync::Arc, borrow::Cow, marker::PhantomData};
 
 use crate::{level_index::LevelIndexList, myfrom::MyFrom};
 
-use super::{ColumnAppenderBase, ColumnAppender, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, GenericColumnAppender, DynColumnAppender};
+use super::{ColumnAppenderBase, ColumnAppender, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, DynColumnAppender};
 // Arrow: compose child arrays into StructArray for struct/group columns
 use arrow::array::{ArrayRef, BinaryDictionaryBuilder, StructArray};
 use arrow::datatypes::DataType as ArrowDataType;
@@ -105,7 +105,7 @@ pub trait StaticMergedAppender<T: Clone>: ColumnAppender<T> {
         StaticMergedAppender::add_appender(self, appender.preprocess(f))
     }
 
-    // fn add_primitive_column<TPq: parquet::data_type::DataType, T2: Clone, F: Fn(Cow<T>) -> Cow<T2>>(self, max_dl: i16, max_rl: i16, f: F) -> StaticMergedAppenderImpl<T, PreprocessAppender<T, T2, GenericColumnAppender<T2, TPq, impl Fn(TPg) -> TPq::T>, F>, Self>
+	// fn add_primitive_column<TPq: parquet::data_type::DataType, T2: Clone, F: Fn(Cow<T>) -> Cow<T2>>(self, max_dl: i16, max_rl: i16, f: F) -> StaticMergedAppenderImpl<T, PreprocessAppender<T, T2, PrimitiveColumnAppender<T2, TPq, impl Fn(TPg) -> TPq::T>, F>, Self>
     //     where Self: Sized,
     //           TPq::T : MyFrom<T2> + RealMemorySize {
     //     let appender = new_autoconv_generic_appender::<T2, TPq>(max_dl, max_rl);
