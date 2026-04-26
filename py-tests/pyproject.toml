@@ -17,7 +17,7 @@ pyarrow = "^19.0.1"
 psycopg = "^3.1.19"
 duckdb = "^1.2.1"
 polars = "^1.24.0"
-pytest = "^8.2.0"
+pytest = ">=8.2,<10.0"
 pandas = "^2.2.3"
 
 [build-system]
