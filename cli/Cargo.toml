@@ -28,7 +28,7 @@ bigdecimal = "0.4.7"
 bytes = "1.11.1"
 postgres-protocol = "0.6.7"
 byteorder = "1.5.0"
-rpassword = "7.3.1"
+rpassword = "7.5.3"
 # optional:
 clap_mangen = { version = "0.2.29", optional = true }
 clap_complete = { version = "4.5.58", optional = true }
