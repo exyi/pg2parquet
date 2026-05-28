@@ -3,6 +3,7 @@ pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH"
 ]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main@sha256:a02050d5e7e4f94b69a429ceb85653a86486b9bcb8f60d041af87770705dbcc5 "
 
 [target.riscv64gc-unknown-linux-gnu]
 pre-build = [
