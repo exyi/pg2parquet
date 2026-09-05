@@ -4,7 +4,7 @@ use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal, BigInt};
 use bigdecimal::ToPrimitive;
 
-use crate::appenders::{ColumnAppender, ColumnAppenderBase, new_autoconv_byte_array_binary_appender, new_autoconv_generic_appender, PreprocessExt, PreprocessAppender, UnwrapOptionAppender};
+use crate::appenders::{ColumnAppender, ColumnAppenderBase, PreprocessAppender, PreprocessExt, PrimitiveParquetType, UnwrapOptionAppender, new_autoconv_byte_array_binary_appender, new_autoconv_generic_appender};
 use crate::level_index::LevelIndexList;
 use crate::myfrom::MyFrom;
 // Arrow export
@@ -39,7 +39,7 @@ pub fn new_decimal_bytes_appender(max_dl: i16, max_rl: i16, precision: u32, scal
 	}
 }
 
-pub fn new_decimal_int_appender<Int: TryFrom<BigInt> + Clone, TPq: parquet::data_type::DataType>(max_dl: i16, max_rl: i16, precision: u32, scale: i32) -> impl ColumnAppender<PgNumeric>
+pub fn new_decimal_int_appender<Int: TryFrom<BigInt> + Clone, TPq: PrimitiveParquetType>(max_dl: i16, max_rl: i16, precision: u32, scale: i32) -> impl ColumnAppender<PgNumeric>
 	where Int::Error: std::fmt::Display,
 		TPq::T: Clone + crate::appenders::RealMemorySize,
 		TPq::T: MyFrom<Int>{

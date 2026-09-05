@@ -30,10 +30,6 @@ impl<T: Clone, Appender2: ColumnAppender<T>> ColumnAppenderBase for UnwrapOption
         self.appender.to_arrow_array(target)
     }
 
-    fn clear(&mut self) {
-        self.appender.clear();
-    }
-
 }
 impl<T: Clone, Appender2: ColumnAppender<T>> ColumnAppender<Option<T>> for UnwrapOptionAppender<T, Appender2> {
     fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<Option<T>>) -> Result<usize, String> {
@@ -67,11 +63,6 @@ impl<T1: Clone, T2: Clone, Appender2: ColumnAppender<T2>, F: Fn(Cow<T1>) -> Cow<
     fn to_arrow_array(&mut self, target: &arrow::datatypes::DataType) -> Result<arrow::array::ArrayRef, String> {
         self.appender.to_arrow_array(target)
     }
-
-    fn clear(&mut self) {
-        self.appender.clear();
-    }
-
 }
 impl<T1: Clone, T2: Clone, Appender2: ColumnAppender<T2>, F: Fn(Cow<T1>) -> Cow<T2>> ColumnAppender<T1> for PreprocessAppender<T1, T2, Appender2, F> {
     fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<T1>) -> Result<usize, String> {
@@ -118,9 +109,6 @@ impl<T, TInner: ColumnAppender<Arc<T>>> ColumnAppenderBase for RcWrapperAppender
     fn to_arrow_array(&mut self, target: &arrow::datatypes::DataType) -> Result<arrow::array::ArrayRef, String> {
         self.inner.to_arrow_array(target)
     }
-
-    fn clear(&mut self) { self.inner.clear(); }
-
 }
 impl<T: Clone, TInner: ColumnAppender<Arc<T>>> ColumnAppender<T> for RcWrapperAppender<T, TInner> {
 	fn copy_value(&mut self, repetition_index: &crate::level_index::LevelIndexList, value: Cow<T>) -> Result<usize, String> {

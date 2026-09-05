@@ -71,11 +71,6 @@ impl<T> ColumnAppenderBase for DynamicMergedAppender<T> {
 		self.present.clear();
 	Ok(std::sync::Arc::new(sa) as ArrayRef)
 	}
-
-	fn clear(&mut self) {
-		for c in self.columns.iter_mut() { c.clear(); }
-		self.present.clear();
-	}
 }
 
 impl<T: Clone> ColumnAppender<T> for DynamicMergedAppender<T> {
@@ -133,11 +128,6 @@ impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> ColumnAppe
     fn max_rl(&self) -> i16 {
         self.next.max_rl()
     }
-
-    fn clear(&mut self) {
-        self.next.clear();
-        self.appender.clear();
-    }
 }
 
 impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> ColumnAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
@@ -163,8 +153,6 @@ impl ColumnAppenderBase for StaticMergedAppenderNil {
     fn max_dl(&self) -> i16 { self.max_dl }
 
     fn max_rl(&self) -> i16 { self.max_rl }
-
-    fn clear(&mut self) {}
 }
 
 impl<T: Clone> ColumnAppender<T> for StaticMergedAppenderNil {

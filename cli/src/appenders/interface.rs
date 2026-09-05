@@ -53,10 +53,6 @@ impl<T> ColumnAppenderBase for DynColumnAppender<T> {
 	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
 		self.as_mut().to_arrow_array(target)
 	}
-
-	fn clear(&mut self) {
-		self.as_mut().clear();
-	}
 }
 
 impl<T: Clone> ColumnAppender<T> for DynColumnAppender<T> {

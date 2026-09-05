@@ -1,6 +1,6 @@
 use std::{borrow::Cow, marker::PhantomData, sync::Arc};
 
-use arrow::array::{ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, StringBuilder};
+use arrow::array::{ArrayBuilder, ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, StringBuilder};
 use arrow::datatypes::DataType as ArrowDataType;
 
 use parquet::basic;
@@ -13,54 +13,54 @@ use crate::{
 
 use super::{real_memory_size::RealMemorySize, ColumnAppender, ColumnAppenderBase, DynColumnAppender};
 
-pub trait ArrowBuilderBridge: Sized {
-	type Native: Copy + RealMemorySize;
+// pub trait ArrowBuilderBridge: Sized {
+// 	type Native: Copy + RealMemorySize;
+//
+// 	fn with_capacity(capacity: usize) -> Self;
+// 	fn append_value(&mut self, value: Self::Native);
+// 	fn append_null(&mut self);
+// 	fn finish(self) -> ArrayRef;
+// 	fn arrow_type() -> ArrowDataType;
+// }
+//
+// macro_rules! impl_arrow_builder_bridge {
+// 	($builder:ty, $native:ty, $arrow_dt:expr) => {
+// 		impl ArrowBuilderBridge for $builder {
+// 			type Native = $native;
+//
+// 			fn with_capacity(capacity: usize) -> Self {
+// 				<$builder>::with_capacity(capacity)
+// 			}
+//
+// 			fn append_value(&mut self, value: Self::Native) {
+// 				self.append_value(value)
+// 			}
+//
+// 			fn append_null(&mut self) {
+// 				self.append_null()
+// 			}
+//
+// 			fn finish(mut self) -> ArrayRef {
+// 				Arc::new(<$builder>::finish(&mut self)) as ArrayRef
+// 			}
+//
+// 			fn arrow_type() -> ArrowDataType {
+// 				$arrow_dt
+// 			}
+// 		}
+// 	};
+// }
 
-	fn with_capacity(capacity: usize) -> Self;
-	fn append_value(&mut self, value: Self::Native);
-	fn append_null(&mut self);
-	fn finish(self) -> ArrayRef;
-	fn arrow_type() -> ArrowDataType;
-}
-
-macro_rules! impl_arrow_builder_bridge {
-	($builder:ty, $native:ty, $arrow_dt:expr) => {
-		impl ArrowBuilderBridge for $builder {
-			type Native = $native;
-
-			fn with_capacity(capacity: usize) -> Self {
-				<$builder>::with_capacity(capacity)
-			}
-
-			fn append_value(&mut self, value: Self::Native) {
-				self.append_value(value)
-			}
-
-			fn append_null(&mut self) {
-				self.append_null()
-			}
-
-			fn finish(mut self) -> ArrayRef {
-				Arc::new(<$builder>::finish(&mut self)) as ArrayRef
-			}
-
-			fn arrow_type() -> ArrowDataType {
-				$arrow_dt
-			}
-		}
-	};
-}
-
-impl_arrow_builder_bridge!(BooleanBuilder, bool, ArrowDataType::Boolean);
-impl_arrow_builder_bridge!(Int32Builder, i32, ArrowDataType::Int32);
-impl_arrow_builder_bridge!(Int64Builder, i64, ArrowDataType::Int64);
-impl_arrow_builder_bridge!(Float32Builder, f32, ArrowDataType::Float32);
-impl_arrow_builder_bridge!(Float64Builder, f64, ArrowDataType::Float64);
+// impl_arrow_builder_bridge!(BooleanBuilder, bool, ArrowDataType::Boolean);
+// impl_arrow_builder_bridge!(Int32Builder, i32, ArrowDataType::Int32);
+// impl_arrow_builder_bridge!(Int64Builder, i64, ArrowDataType::Int64);
+// impl_arrow_builder_bridge!(Float32Builder, f32, ArrowDataType::Float32);
+// impl_arrow_builder_bridge!(Float64Builder, f64, ArrowDataType::Float64);
 
 pub trait PrimitiveParquetType: DataType
-	where Self::T: Copy + RealMemorySize
+	where Self::T: Clone + RealMemorySize
 {
-	type Builder: ArrowBuilderBridge<Native = Self::T>;
+	type Builder: ArrayBuilder + Extend<Option<Self::T>> + Default;
 }
 
 impl PrimitiveParquetType for parquet::data_type::BoolType {
@@ -78,18 +78,19 @@ impl PrimitiveParquetType for parquet::data_type::FloatType {
 impl PrimitiveParquetType for parquet::data_type::DoubleType {
 	type Builder = Float64Builder;
 }
+impl PrimitiveParquetType for parquet::data_type::ByteArrayType {
+	type Builder = BinaryBuilder;
+}
 
 pub struct PrimitiveColumnAppender<TPg, TPq, FConversion>
 	where
 		TPq: PrimitiveParquetType,
-		TPq::T: Copy + RealMemorySize,
+		TPq::T: RealMemorySize,
 		FConversion: Fn(TPg) -> TPq::T,
 {
 	max_dl: i16,
 	max_rl: i16,
 	builder: TPq::Builder,
-	dls: Vec<i16>,
-	rls: Vec<i16>,
 	repetition_index: LevelIndexState,
 	conversion: FConversion,
 	_pg: PhantomData<TPg>,
@@ -99,7 +100,7 @@ pub struct PrimitiveColumnAppender<TPg, TPq, FConversion>
 pub fn new_autoconv_generic_appender<TPg, TPq>(max_dl: i16, max_rl: i16) -> PrimitiveColumnAppender<TPg, TPq, impl Fn(TPg) -> TPq::T>
 	where
 		TPq: PrimitiveParquetType,
-		TPq::T: Copy + RealMemorySize + MyFrom<TPg>,
+		TPq::T: Clone + RealMemorySize + MyFrom<TPg>,
 {
 	PrimitiveColumnAppender::new(max_dl, max_rl, |value: TPg| MyFrom::my_from(value))
 }
@@ -107,7 +108,7 @@ pub fn new_autoconv_generic_appender<TPg, TPq>(max_dl: i16, max_rl: i16) -> Prim
 impl<TPg, TPq, FConversion> PrimitiveColumnAppender<TPg, TPq, FConversion>
 	where
 		TPq: PrimitiveParquetType,
-		TPq::T: Copy + RealMemorySize,
+		TPq::T: RealMemorySize,
 		FConversion: Fn(TPg) -> TPq::T,
 {
 	pub fn new(max_dl: i16, max_rl: i16, conversion: FConversion) -> Self {
@@ -122,9 +123,7 @@ impl<TPg, TPq, FConversion> PrimitiveColumnAppender<TPg, TPq, FConversion>
 		PrimitiveColumnAppender {
 			max_dl,
 			max_rl,
-			builder: TPq::Builder::with_capacity(0),
-			dls: Vec::new(),
-			rls: Vec::new(),
+			builder: TPq::Builder::default(),
 			repetition_index: LevelIndexState::new(max_rl),
 			conversion,
 			_pg: PhantomData,
@@ -140,20 +139,15 @@ impl<TPg, TPq, FConversion> PrimitiveColumnAppender<TPg, TPq, FConversion>
 impl<TPg, TPq, FConversion> ColumnAppenderBase for PrimitiveColumnAppender<TPg, TPq, FConversion>
 	where
 		TPq: PrimitiveParquetType,
-		TPq::T: Copy + RealMemorySize,
+		TPq::T: RealMemorySize,
 		FConversion: Fn(TPg) -> TPq::T,
 {
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+	fn write_null(&mut self, _repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		if self.max_dl == 0 {
 			return Err("Cannot write null to required column".to_string());
 		}
 		debug_assert!(level < self.max_dl);
-		self.dls.push(level);
-		if self.max_rl > 0 {
-			let rl = self.repetition_index.copy_and_diff(repetition_index);
-			self.rls.push(rl);
-		}
-		self.builder.append_null();
+		self.builder.extend([None]);
 		Ok(2 + if self.max_rl > 0 { 2 } else { 0 })
 	}
 
@@ -166,45 +160,28 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for PrimitiveColumnAppender<TPg, 
 	}
 
 	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
-		let expected = <TPq::Builder as ArrowBuilderBridge>::arrow_type();
-		if target != &expected {
+		let array = self.builder.finish();
+		if target != array.data_type() { // TODO: remove ArrowDataType
 			return Err(format!(
 				"Arrow export mismatch: expected {:?}, received {:?}",
-				expected,
+				array.data_type(),
 				target
 			));
 		}
-		let builder = std::mem::replace(&mut self.builder, TPq::Builder::with_capacity(0));
-		let array = builder.finish();
-		self.dls.clear();
-		self.rls.clear();
 		Ok(array)
-	}
-
-	fn clear(&mut self) {
-		self.builder = TPq::Builder::with_capacity(0);
-		self.dls.clear();
-		self.rls.clear();
 	}
 }
 
 impl<TPg: Clone, TPq, FConversion> ColumnAppender<TPg> for PrimitiveColumnAppender<TPg, TPq, FConversion>
 	where
 		TPq: PrimitiveParquetType,
-		TPq::T: Copy + RealMemorySize,
+		TPq::T: RealMemorySize,
 		FConversion: Fn(TPg) -> TPq::T,
 {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
+	fn copy_value(&mut self, _repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
 		let pq_value = self.convert(value.into_owned());
 		let byte_size = pq_value.real_memory_size();
-		self.builder.append_value(pq_value);
-		if self.max_dl > 0 {
-			self.dls.push(self.max_dl);
-		}
-		if self.max_rl > 0 {
-			let rl = self.repetition_index.copy_and_diff(repetition_index);
-			self.rls.push(rl);
-		}
+		self.builder.extend([Some(pq_value)]);
 		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
 	}
 }
@@ -224,8 +201,6 @@ pub struct ByteArrayBinaryColumnAppender<TPg, FConversion>
 	max_dl: i16,
 	max_rl: i16,
 	builder: BinaryBuilder,
-	dls: Vec<i16>,
-	rls: Vec<i16>,
 	repetition_index: LevelIndexState,
 	conversion: FConversion,
 	_pg: PhantomData<TPg>,
@@ -249,8 +224,6 @@ impl<TPg, FConversion> ByteArrayBinaryColumnAppender<TPg, FConversion>
 			max_dl,
 			max_rl,
 			builder: BinaryBuilder::new(),
-			dls: Vec::new(),
-			rls: Vec::new(),
 			repetition_index: LevelIndexState::new(max_rl),
 			conversion,
 			_pg: PhantomData,
@@ -266,16 +239,11 @@ impl<TPg: Clone, FConversion> ColumnAppenderBase for ByteArrayBinaryColumnAppend
 	where
 		FConversion: Fn(TPg) -> PqByteArray,
 {
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+	fn write_null(&mut self, _repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
 		if self.max_dl == 0 {
 			return Err("Cannot write null to required column".to_string());
 		}
 		debug_assert!(level < self.max_dl);
-		self.dls.push(level);
-		if self.max_rl > 0 {
-			let rl = self.repetition_index.copy_and_diff(repetition_index);
-			self.rls.push(rl);
-		}
 		self.builder.append_null();
 		Ok(2 + if self.max_rl > 0 { 2 } else { 0 })
 	}
@@ -288,17 +256,8 @@ impl<TPg: Clone, FConversion> ColumnAppenderBase for ByteArrayBinaryColumnAppend
 		if target != &ArrowDataType::Binary {
 			return Err("Arrow BYTE_ARRAY export: expected Binary".to_string());
 		}
-		let mut builder = std::mem::replace(&mut self.builder, BinaryBuilder::new());
-		let array = Arc::new(builder.finish()) as ArrayRef;
-		self.dls.clear();
-		self.rls.clear();
+		let array = Arc::new(self.builder.finish()) as ArrayRef;
 		Ok(array)
-	}
-
-	fn clear(&mut self) {
-		self.builder = BinaryBuilder::new();
-		self.dls.clear();
-		self.rls.clear();
 	}
 }
 
@@ -310,13 +269,6 @@ impl<TPg: Clone, FConversion> ColumnAppender<TPg> for ByteArrayBinaryColumnAppen
 		let pq_value = self.convert(value.into_owned());
 		let byte_size = pq_value.real_memory_size();
 		self.builder.append_value(pq_value.data());
-		if self.max_dl > 0 {
-			self.dls.push(self.max_dl);
-		}
-		if self.max_rl > 0 {
-			let rl = self.repetition_index.copy_and_diff(repetition_index);
-			self.rls.push(rl);
-		}
 		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
 	}
 }
@@ -398,12 +350,6 @@ impl<TPg: Clone, FConversion> ColumnAppenderBase for ByteArrayUtf8ColumnAppender
 		self.dls.clear();
 		self.rls.clear();
 		Ok(array)
-	}
-
-	fn clear(&mut self) {
-		self.builder = StringBuilder::new();
-		self.dls.clear();
-		self.rls.clear();
 	}
 }
 
@@ -516,12 +462,6 @@ impl<TPg: Clone, FConversion> ColumnAppenderBase for FixedLenBinaryColumnAppende
 		self.dls.clear();
 		self.rls.clear();
 		Ok(array)
-	}
-
-	fn clear(&mut self) {
-		self.builder = FixedSizeBinaryBuilder::new(self.len);
-		self.dls.clear();
-		self.rls.clear();
 	}
 }
 

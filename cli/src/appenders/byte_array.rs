@@ -80,11 +80,6 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppende
 			_ => Err("Arrow BYTE_ARRAY export: unsupported target type".to_string())
 		}
 	}
-
-	fn clear(&mut self) {
-		self.builder = BinaryBuilder::new();
-		self.scratch.clear();
-	}
 }
 
 impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FCopyTo> {
