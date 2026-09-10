@@ -160,9 +160,7 @@ impl<W: Write + Send + 'static> ArrowParallelWriter<W> {
 
 	/// Write a RecordBatch into the current row group, spawning column-level parallelism.
 	pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), String> {
-		if batch.num_columns() != self.arrow_schema.fields().len() {
-			return Err("RecordBatch does not match the writer schema".to_string());
-		}
+		assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
 		self.ensure_row_group()?;
 		send_arrays_to_col_writers(

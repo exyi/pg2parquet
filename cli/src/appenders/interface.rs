@@ -13,7 +13,7 @@ pub trait ColumnAppenderBase {
 
 	// Export this column as an Arrow Array matching the target type.
 	// Default implementation returns an error; concrete appenders should override when supported.
-	fn to_arrow_array(&mut self, _target: &ArrowDataType) -> Result<ArrayRef, String> { Err("Arrow export not supported for this appender".to_string()) }
+	fn to_arrow_array(&mut self, _target: &ArrowDataType) -> Result<ArrayRef, String>;
 
 	// No-op by default; some appenders may ignore Arrow entirely.
 

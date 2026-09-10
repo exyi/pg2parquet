@@ -84,12 +84,6 @@ impl MyFrom<chrono::NaiveTime> for i64 {
 	}
 }
 
-impl MyFrom<uuid::Uuid> for FixedLenByteArray {
-	fn my_from(t: uuid::Uuid) -> Self {
-		FixedLenByteArray::from(t.as_bytes().to_vec())
-	}
-}
-
 impl<'a> MyFrom<PgEnum> for ByteArray {
 	fn my_from(t: PgEnum) -> Self {
 		ByteArray::from(t.name.into_bytes())

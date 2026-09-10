@@ -1,18 +1,5 @@
 pub use interface::*;
-pub use generic::{
-	PrimitiveColumnAppender,
-	PrimitiveParquetType,
-	BinaryAppenderFactory,
-	BinaryArrowExport,
-	ByteArrayBinaryColumnAppender,
-	ByteArrayUtf8ColumnAppender,
-	FixedLenBinaryColumnAppender,
-	new_autoconv_byte_array_binary_appender,
-	new_autoconv_byte_array_utf8_appender,
-	new_autoconv_fixed_len_binary_appender,
-	new_binary_value_appender,
-	new_autoconv_generic_appender,
-};
+pub use generic::*;
 pub use array::ArrayColumnAppender;
 pub use real_memory_size::RealMemorySize;
 pub use pg_column::BasicPgRowColumnAppender;
@@ -27,3 +14,4 @@ mod pg_column;
 mod merged;
 mod helpers;
 pub mod byte_array;
+pub mod dictionary;

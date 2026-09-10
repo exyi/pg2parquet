@@ -4,7 +4,7 @@ use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal, BigInt};
 use bigdecimal::ToPrimitive;
 
-use crate::appenders::{ColumnAppender, ColumnAppenderBase, PreprocessAppender, PreprocessExt, PrimitiveParquetType, UnwrapOptionAppender, new_autoconv_byte_array_binary_appender, new_autoconv_generic_appender};
+use crate::appenders::{ByteArrayColumnAppender, ColumnAppender, ColumnAppenderBase, PreprocessAppender, PreprocessExt, PrimitiveParquetType, UnwrapOptionAppender, new_autoconv_byte_array_binary_appender, new_autoconv_generic_appender};
 use crate::level_index::LevelIndexList;
 use crate::myfrom::MyFrom;
 // Arrow export
@@ -31,12 +31,13 @@ pub fn convert_decimal_to_int<Int: TryFrom<BigInt>>(d: &BigDecimal, scale: i32, 
 }
 
 pub fn new_decimal_bytes_appender(max_dl: i16, max_rl: i16, precision: u32, scale: i32) -> impl ColumnAppender<PgNumeric> {
-	let inner = new_autoconv_byte_array_binary_appender::<Vec<u8>>(max_dl, max_rl);
-	DecimalBytesAppender {
-		inner,
-		precision,
-		scale,
-	}
+	let inner = ByteArrayColumnAppender::<Vec<u8>, _>::new(max_dl, max_rl, |v| &v);
+	PreprocessAppender::new(UnwrapOptionAppender::new(inner), move |value: Cow<PgNumeric>| {
+		match &value.n {
+			Some(n) => Cow::Owned(Some(convert_decimal_to_bytes(n, scale, precision))),
+			None => Cow::Owned(None)
+		}
+	})
 }
 
 pub fn new_decimal_int_appender<Int: TryFrom<BigInt> + Clone, TPq: PrimitiveParquetType>(max_dl: i16, max_rl: i16, precision: u32, scale: i32) -> impl ColumnAppender<PgNumeric>
@@ -50,43 +51,6 @@ pub fn new_decimal_int_appender<Int: TryFrom<BigInt> + Clone, TPq: PrimitiveParq
 			None => Cow::Owned(None),
 		}
 	})
-}
-
-#[derive(Clone)]
-struct DecimalBytesAppender<TInner: ColumnAppender<Vec<u8>>> {
-	inner: TInner,
-	precision: u32,
-	scale: i32,
-}
-
-impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppenderBase for DecimalBytesAppender<TInner> {
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-		self.inner.write_null(repetition_index, level)
-	}
-	fn max_dl(&self) -> i16 { self.inner.max_dl() }
-	fn max_rl(&self) -> i16 { self.inner.max_rl() }
-
-	fn to_arrow_array(&mut self, target: &ArrowDataType) -> Result<ArrayRef, String> {
-		match target {
-			ArrowDataType::Binary => {
-				// Leverage inner appender's Arrow export if available; otherwise build from buffered Vec<u8>
-				let arr = self.inner.to_arrow_array(target)?;
-				Ok(arr)
-			},
-			_ => Err("Arrow DECIMAL(bytes) export: unsupported target type".to_string())
-		}
-	}
-}
-
-impl<TInner: ColumnAppender<Vec<u8>>> ColumnAppender<PgNumeric> for DecimalBytesAppender<TInner> {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<PgNumeric>) -> Result<usize, String> {
-		let value = value.as_ref();
-		let bytes = match &value.n {
-			Some(n) => Some(convert_decimal_to_bytes(n, self.scale, self.precision)),
-			None => None,
-		};
-		self.inner.copy_value_opt(repetition_index, Cow::Owned(bytes))
-	}
 }
 
 impl MyFrom<PgNumeric> for f64 {
