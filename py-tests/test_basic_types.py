@@ -7,6 +7,7 @@ import unittest
 import duckdb
 import polars as pl
 import pandas as pd
+import pyarrow.parquet as pq
 
 
 class TestBasic(unittest.TestCase):
@@ -128,6 +129,12 @@ class TestBasic(unittest.TestCase):
         pd_df = pd.read_parquet(file2, engine="pyarrow")
         self.assertEqual(list(pd_df["normal"]), [Decimal('1000.000100000000000000'), None])
         self.assertEqual(list(pd_df["high_precision"]), [Decimal('1.00000000000000000000000000000000000000000001'), None])
+        parquet = pq.ParquetFile(file2)
+        for row_group_index in range(parquet.num_row_groups):
+            row_group = parquet.metadata.row_group(row_group_index)
+            # temporary workaround for https://github.com/apache/arrow-rs/issues/11073
+            assert row_group.column(1).statistics is None
+            assert row_group.column(2).statistics is None
 
     def test_decimal_i32(self):
         file = wrappers.create_and_export(
@@ -146,14 +153,29 @@ class TestBasic(unittest.TestCase):
         file = wrappers.create_and_export(
             "numeric_types", "id",
             "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
-            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
+            """(1, 1000.0001, 1.00000000000000000000000000000000000000000001),
+               (2, 'NaN', 'NaN'),
+               (3, 0.001, 10.0),
+               (4, -10, -20.1)""",
             options=["--decimal-precision=18", "--decimal-scale=9", "--numeric-handling=decimal"]
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
-            (1, Decimal('1000.000100000000000000'), Decimal('1.000000000000000000')),
-            (2,  None, None )
+            (1, Decimal('1000.0001'), Decimal('1')),
+            (2,  None, None),
+            (3, Decimal('0.001'), Decimal('10')),
+            (4, Decimal('-10'), Decimal('-20.1')),
         ])
+        parquet = pq.ParquetFile(file)
+        for row_group_index in range(parquet.num_row_groups):
+            row_group = parquet.metadata.row_group(row_group_index)
+            assert row_group.column(0).statistics.min == 1  # id
+            assert row_group.column(0).statistics.max == 4
+            assert row_group.column(1).statistics.min == -10  # normal
+            assert row_group.column(1).statistics.max == Decimal('1000.0001')
+            assert row_group.column(2).statistics.min == Decimal('-20.1')  # high_precision
+            assert row_group.column(2).statistics.max == 10
+
     def test_numeric_f64(self):
         file = wrappers.create_and_export(
             "numeric_types", "id",
@@ -301,4 +323,3 @@ class TestBasic(unittest.TestCase):
         })
 
     
-

@@ -1,3 +1,27 @@
+use std::sync::Arc;
+
+use parquet::basic::{ConvertedType, LogicalType, Type};
+use parquet::file::properties::{EnabledStatistics, WriterPropertiesPtr};
+use parquet::schema::types::{SchemaDescriptor, TypePtr};
+
+/// Workaround for https://github.com/apache/arrow-rs/issues/11073
+pub(crate) fn disable_binary_decimal_statistics(
+	schema: TypePtr,
+	props: WriterPropertiesPtr,
+) -> WriterPropertiesPtr {
+	let descriptor = SchemaDescriptor::new(schema);
+	let mut builder = props.as_ref().clone().into_builder();
+	for column in descriptor.columns() {
+		if column.physical_type() == Type::BYTE_ARRAY
+			&& (matches!(column.logical_type(), Some(LogicalType::Decimal { .. }))
+				|| column.converted_type() == ConvertedType::DECIMAL)
+		{
+			builder = builder.set_column_statistics_enabled(column.path().clone(), EnabledStatistics::None);
+		}
+	}
+	Arc::new(builder.build())
+}
+
 /// Statistics for parquet writing operations.
 #[derive(Debug, Clone, Default)]
 pub struct WriterStats {

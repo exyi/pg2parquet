@@ -7,6 +7,7 @@ import pyarrow.parquet
 import polars
 import duckdb
 import atexit
+from parquet_statistics import validate_statistics
 
 env_prefix = "PG2PARQUET_TEST_"
 
@@ -118,6 +119,8 @@ def run_export(name, query = None, options = []) -> str:
     ]
 
     run_pg2parquet(args)
+
+    validate_statistics(outfile)
 
     return outfile
 

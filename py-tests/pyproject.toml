@@ -13,7 +13,7 @@ requires-python = ">=3.12,<4.0"
 
 [tool.poetry.dependencies]
 numpy = "2.2.3"
-pyarrow = "^19.0.1"
+pyarrow = "^23.0.1"
 psycopg = "^3.2.10"
 duckdb = "^1.2.1"
 polars = "^1.24.0"

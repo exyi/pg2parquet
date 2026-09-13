@@ -312,6 +312,7 @@ pub fn execute_copy(
 		eprintln!("Schema: {}", format_schema(&schema, 0));
 	}
 	let schema = Arc::new(schema);
+	let output_props = crate::parquet_writer::disable_binary_decimal_statistics(schema.clone(), output_props);
 
 	let settings = WriterSettings { row_group_byte_limit: 500 * 1024 * 1024, row_group_row_limit: output_props.max_row_group_size() };
 
@@ -428,7 +429,8 @@ pub fn execute_copy(
 				for app in col_appenders.iter_mut() { app.copy_value(&lvl, Cow::Borrowed(&row))?; }
 				lvl.inc();
 				batch_rows += 1; 
-				// Try to flush batches via Arrow when large enough
+				// TODO: configurable batch size
+				// TODO: handle row_group_byte_limit
 				if batch_rows >= 4096 {
 					let arrays: Vec<ArrayRef> = {
 						let mut out = Vec::with_capacity(col_appenders.len());
