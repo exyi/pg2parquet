@@ -415,7 +415,7 @@ pub fn execute_copy(
 			// Take ownership of the file writer for Arrow path
 			let mut apw = {
 				let fw = pq_writer;
-				crate::arrow_parallel_writer::create_arrow_parallel_writer(
+				crate::arrow_parallel_writer::ArrowParallelWriter::new(
 					fw, arrow_schema.clone(), parquet_schema, output_props.clone(), settings.clone()
 				)
 			};
@@ -1226,5 +1226,4 @@ impl ColumnInfo {
 		self.names.join("/")
 	}
 }
-
 
