@@ -15,3 +15,6 @@ mod merged;
 mod helpers;
 pub mod byte_array;
 pub mod dictionary;
+
+#[cfg(test)]
+mod tests;

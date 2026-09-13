@@ -413,35 +413,29 @@ pub fn execute_copy(
 			// We avoid consuming appender buffers during preflight; this only checks schema mapping.
 			// Use buffered Arrow export per-batch; do not require prior preparation
 			// Take ownership of the file writer for Arrow path
-			let mut apw = {
-				let fw = pq_writer;
-				crate::arrow_parallel_writer::ArrowParallelWriter::new(
-					fw, arrow_schema.clone(), parquet_schema, output_props.clone(), settings.clone()
-				)
-			};
+			let mut apw = crate::arrow_parallel_writer::ArrowParallelWriter::new(
+				pq_writer, arrow_schema.clone(), parquet_schema, output_props.clone(), settings.clone()
+			);
 
-			let mut lvl = crate::level_index::LevelIndexList::new();
 			let mut batch_rows = 0usize;
 			let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
 				.map_err(|err| format!("Failed to execute the SQL query: {}", err))?;
-			for r in rows.iterator() {
+			for (row_i, r) in rows.iterator().enumerate() {
 				let row = Arc::new(r.map_err(|err| format!("Error loading row from postgres: {err}"))?);
-				for app in col_appenders.iter_mut() { app.copy_value(&lvl, Cow::Borrowed(&row))?; }
-				lvl.inc();
+				for (col_i, app) in col_appenders.iter_mut().enumerate() {
+					app.copy_value(Cow::Borrowed(&row))
+						.map_err(|e| format!("Failed to row {row_i} column {col_i}: {e}"))?;
+				}
 				batch_rows += 1; 
 				// TODO: configurable batch size
 				// TODO: handle row_group_byte_limit
 				if batch_rows >= 4096 {
-					let arrays: Vec<ArrayRef> = {
-						let mut out = Vec::with_capacity(col_appenders.len());
-						for (i, a) in col_appenders.iter_mut().enumerate() {
-							let target = arrow_schema.field(i).data_type().clone();
-							let arr = a.to_arrow_array(&target)?;
-							out.push(arr);
-						}
-						out
-					};
-					let rb = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| e.to_string())?;
+					let mut arrays: Vec<ArrayRef> = Vec::with_capacity(col_appenders.len());
+					for (col_i, a) in col_appenders.iter_mut().enumerate() {
+						let arr = a.to_arrow_array().map_err(|e| format!("Failed Arrow conversion of column {col_i}: {e}"))?;
+						arrays.push(arr);
+					}
+					let rb = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| format!("Failed to create RecordBatch at row {row_i}: {e}"))?;
 					apw.write_batch(&rb)?;
 					batch_rows = 0;
 				}
@@ -449,7 +443,7 @@ pub fn execute_copy(
 			// Flush any remaining via Arrow if still using it
 			if batch_rows > 0 {
 				let arrays: Vec<ArrayRef> = (0..col_appenders.len())
-					.map(|i| col_appenders[i].to_arrow_array(arrow_schema.field(i).data_type()))
+					.map(|i| col_appenders[i].to_arrow_array())
 					.collect::<Result<Vec<_>,_>>()?;
 				if !quiet {
 					let lens: Vec<usize> = arrays.iter().map(|a| a.len()).collect();
@@ -569,7 +563,7 @@ fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedCol
 
 	let (column_appenders, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
 
-	let merged_appender: DynColumnAppender<Arc<Row>> = Box::new(DynamicMergedAppender::new(column_appenders, 0, 0));
+	let merged_appender: DynColumnAppender<Arc<Row>> = Box::new(DynamicMergedAppender::new(column_appenders, parquet_types.iter().map(field_metadata).collect()));
 	let struct_type = ParquetType::group_type_builder("root")
 		.with_fields(parquet_types.into_iter().map(Arc::new).collect())
 		.build()
@@ -617,10 +611,7 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 			};
 
 			// Build array appender for the logical value type: PgMultidimArray<Option<PgAny>>
-			assert_eq!(element_appender.max_dl(), element_column.definition_level + 1);
-			assert_eq!(element_appender.max_rl(), element_column.repetition_level);
-			let outer_dl = c.definition_level + 1;
-			let array_inner = ArrayColumnAppender::new(element_appender, true, true, outer_dl, c.repetition_level);
+			let array_inner = ArrayColumnAppender::new(element_appender, true, true);
 			let warned = AtomicBool::new(false);
 			let col_clone = c.clone();
 			let array_for_value = array_inner.preprocess(move |x: Cow<PgMultidimArray<Option<PgAny>>>| {
@@ -641,14 +632,14 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 			});
 
 			// Build dims and lower_bound appenders for the logical value type
-			let int_appender = new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level + 1);
-			let dims_for_value = ArrayColumnAppender::new(int_appender, false, false, c.definition_level + 1, c.repetition_level)
+			let int_appender = new_autoconv_generic_appender::<i32, Int32Type>();
+			let dims_for_value = ArrayColumnAppender::new(int_appender, false, false)
 				.preprocess(|x: Cow<PgMultidimArray<Option<PgAny>>>| Cow::<Vec<Option<i32>>>::Owned(
 					x.dims.as_ref()
 						.map(|x| x.iter().map(|c| Some(*c)).collect())
 						.unwrap_or_else(|| if x.data.len() == 0 { Vec::new() } else { vec![Some(x.data.len() as i32)] })
 				));
-			let lb_for_value = ArrayColumnAppender::new(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level + 1), false, false, c.definition_level + 1, c.repetition_level)
+			let lb_for_value = ArrayColumnAppender::new(new_autoconv_generic_appender::<i32, Int32Type>(), false, false)
 				.preprocess(|x: Cow<PgMultidimArray<Option<PgAny>>>| Cow::<Vec<Option<i32>>>::Owned(
 					match &x.lower_bounds {
 						_ if x.data.len() == 0 => Vec::new(),
@@ -670,7 +661,7 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 						Box::new(array_for_value),
 						Box::new(dims_for_value),
 					];
-					let dynm = DynamicMergedAppender::new(children, c.definition_level + 1, c.repetition_level);
+					let dynm = DynamicMergedAppender::new(children, vec![field_metadata(&schema), field_metadata(&dim_schema)]);
 					let dynm_opt = UnwrapOptionAppender::new(dynm);
 					let wrapped = wrap_pg_row_reader::<TRow, Option<PgMultidimArray<Option<PgAny>>>>(&c, dynm_opt);
 					Ok((Box::new(wrapped),
@@ -685,7 +676,7 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 						Box::new(dims_for_value),
 						Box::new(lb_for_value),
 					];
-					let dynm = DynamicMergedAppender::new(children, c.definition_level + 1, c.repetition_level);
+					let dynm = DynamicMergedAppender::new(children, vec![field_metadata(&schema), field_metadata(&dim_schema), field_metadata(&lb_schema)]);
 					let dynm_opt = UnwrapOptionAppender::new(dynm);
 					let wrapped = wrap_pg_row_reader::<TRow, Option<PgMultidimArray<Option<PgAny>>>>(&c, dynm_opt);
 					Ok((Box::new(wrapped),
@@ -719,13 +710,13 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 			let mut children: Vec<DynColumnAppender<UnclonableHack<PgRawRange>>> = Vec::new();
 			children.push(col_lower.0);
 			children.push(col_upper.0);
-			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level)
+			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>()
 				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.lower_inclusive))));
-			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level)
+			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>()
 				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.upper_inclusive))));
-			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>(c.definition_level + 2, c.repetition_level)
+			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>()
 				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.is_empty))));
-			let dynm = DynamicMergedAppender::new(children, c.definition_level + 1, c.repetition_level)
+			let dynm = DynamicMergedAppender::new(children, schema.get_fields().iter().map(|f| field_metadata(f)).collect())
 				.preprocess(|x: Cow<PgRawRange>| match x { Cow::Owned(x) => Cow::Owned(UnclonableHack(x)), Cow::Borrowed(_) => panic!() });
 
 			let appender_dyn = wrap_pg_row_reader(c, dynm);
@@ -746,7 +737,7 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 				.build()
 				.unwrap();
 
-			let appender = create_complex_appender::<PgRawRecord, TRow>(c, column_appenders);
+			let appender = create_complex_appender::<PgRawRecord, TRow>(c, column_appenders, schema.get_fields().iter().map(|f| field_metadata(f)).collect());
 
 			Ok((Box::new(appender), schema))
 		}
@@ -792,7 +783,7 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 		"bytea" => resolve_binary::<Vec<u8>, _>(name, c, None, None),
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
 			resolve_binary::<String, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8)),
-			// (Box::new(crate::appenders::byte_array::create_pg_raw_appender(c.definition_level + 1, c.repetition_level, c.col_i)),
+			// (Box::new(crate::appenders::byte_array::create_pg_raw_appender(c.col_i)),
 			// 	ParquetType::primitive_type_builder(name, basic::Type::BYTE_ARRAY).with_logical_type(Some(LogicalType::String)).with_converted_type(ConvertedType::UTF8).build().unwrap()),
 		"jsonb" | "json" =>
 			resolve_binary::<PgRawJsonb, _>(name, c, Some(match s.json_handling {
@@ -840,13 +831,13 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 						.build().unwrap();
 					// Build a dynamic merged appender so Arrow Struct export is supported
 					let mut children: Vec<DynColumnAppender<PgInterval>> = Vec::new();
-					children.push(Box::new(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level)
+					children.push(Box::new(new_autoconv_generic_appender::<i32, Int32Type>()
 						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.months))));
-					children.push(Box::new(new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level)
+					children.push(Box::new(new_autoconv_generic_appender::<i32, Int32Type>()
 						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.days))));
-					children.push(Box::new(new_autoconv_generic_appender::<i64, Int64Type>(c.definition_level + 2, c.repetition_level)
+					children.push(Box::new(new_autoconv_generic_appender::<i64, Int64Type>()
 						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.microseconds))));
-					let dynm = DynamicMergedAppender::new(children, c.definition_level + 1, c.repetition_level);
+					let dynm = DynamicMergedAppender::new(children, t.get_fields().iter().map(|f| field_metadata(f)).collect());
 					(Box::new(wrap_pg_row_reader(c, dynm)), t)
 				},
 			},
@@ -863,10 +854,10 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 				resolve_vector_conv::<pgvector::PgF16Vector, f16, FloatType, _, TRow>(name, c, None, None, None, |v| v.into())
 		},
 		"sparsevec" => {
-			let inner_appender = new_static_merged_appender::<(i32, f32)>(c.definition_level + 2, c.repetition_level + 1, true)
+			let inner_appender = new_static_merged_appender::<(i32, f32)>()
 				// index+1, because pgvector uses 0-based in binary, but 1-based in text and operators
-				.add_appender(PrimitiveColumnAppender::<_, Int32Type, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.0 + 1))
-				.add_appender(PrimitiveColumnAppender::<_, FloatType, _>::new(c.definition_level + 2, c.repetition_level + 1, |v: (i32, f32)| v.1));
+				.add_appender("key", false, PrimitiveColumnAppender::<_, Int32Type, _>::new(|v: (i32, f32)| v.0 + 1))
+				.add_appender("value", false, PrimitiveColumnAppender::<_, FloatType, _>::new(|v: (i32, f32)| v.1));
 
 			let schema = ParquetType::group_type_builder(name)
 				.with_repetition(Repetition::OPTIONAL)
@@ -885,7 +876,7 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 				.with_logical_type(Some(LogicalType::Map))
 				.build().unwrap();
 
-			let array_appender = ArrayColumnAppender::new(inner_appender, true, false, c.definition_level + 1, c.repetition_level);
+			let array_appender = ArrayColumnAppender::new(inner_appender, true, false).with_element_name("key_value");
 
 			(Box::new(wrap_pg_row_reader::<TRow, PgSparseVector>(&c, array_appender)), schema)
 		}
@@ -914,13 +905,13 @@ fn resolve_numeric<TRow: PgAbstractRow + Clone + 'static>(s: &SchemaSettings, na
 				.with_scale(scale)
 				.build().unwrap();
 		let cp: DynColumnAppender<TRow> = if pq_type == basic::Type::INT32 {
-				let appender = new_decimal_int_appender::<i32, Int32Type>(c.definition_level + 1, c.repetition_level, precision, scale);
+				let appender = new_decimal_int_appender::<i32, Int32Type>(precision, scale);
 				Box::new(wrap_pg_row_reader(c, appender))
 			} else if pq_type == basic::Type::INT64 {
-				let appender = new_decimal_int_appender::<i64, Int64Type>(c.definition_level + 1, c.repetition_level, precision, scale);
+				let appender = new_decimal_int_appender::<i64, Int64Type>(precision, scale);
 				Box::new(wrap_pg_row_reader(c, appender))
 			} else {
-				let appender = new_decimal_bytes_appender(c.definition_level + 1, c.repetition_level, s.decimal_precision, s.decimal_scale);
+				let appender = new_decimal_bytes_appender(s.decimal_precision, s.decimal_scale);
 				Box::new(wrap_pg_row_reader(c, appender))
 			};
 			Ok((cp, schema))
@@ -957,8 +948,6 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, F
 	convert: FConversion
 ) -> ResolvedColumn<TRow>
 	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize {
-	let mut c = c.clone();
-	c.definition_level += 1; // TODO: can we support NOT NULL fields?
 	let t =
 		build_primitive_pq_type(name, TDataType::get_physical_type(), length, logical_type, conv_type)
 		.build().unwrap();
@@ -989,8 +978,6 @@ fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
 ) -> ResolvedColumn<TRow> {
-	let mut c = c.clone();
-	c.definition_level += 1;
 	let t =
 		build_primitive_pq_type(name, parquet::basic::Type::BYTE_ARRAY, length, logical_type, conv_type)
 		.build().unwrap();
@@ -1006,13 +993,11 @@ fn resolve_fixlen_binary<const N: usize, T: for<'a> FromSql<'a> + Clone + 'stati
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
 ) -> ResolvedColumn<TRow> {
-	let mut c = c.clone();
-	c.definition_level += 1;
 	let t =
 		build_primitive_pq_type(name, parquet::basic::Type::FIXED_LEN_BYTE_ARRAY, Some(N as i32), logical_type, conv_type)
 		.build().unwrap();
 
-	let appender = FixedLenBinaryColumnAppender::new(c.definition_level, c.repetition_level, convert);
+	let appender = FixedLenBinaryColumnAppender::new(convert);
 	mk_resolved::<TRow, T>(c.col_i, appender, t)
 }
 
@@ -1033,8 +1018,8 @@ fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> 
 
 	let arr_t = make_list_schema(name, Repetition::OPTIONAL, t);
 
-	let inner_appender = PrimitiveColumnAppender::<T, TDataType, FConversion>::new(c.definition_level + 2, c.repetition_level + 1, convert);
-	let array_appender = ArrayColumnAppender::new(inner_appender, true, false, c.definition_level + 1, c.repetition_level);
+	let inner_appender = PrimitiveColumnAppender::<T, TDataType, FConversion>::new(convert);
+	let array_appender = ArrayColumnAppender::new(inner_appender, true, false);
 
 	mk_resolved::<TRow, TArr>(c.col_i, array_appender, arr_t)
 }
@@ -1054,8 +1039,8 @@ fn resolve_vector_binary_conv<const N: usize, TArr: for<'a> FromSql<'a> + Clone 
 
 	let arr_t = make_list_schema(name, Repetition::OPTIONAL, t);
 
-	let inner_appender = FixedLenBinaryColumnAppender::new(c.definition_level + 2, c.repetition_level + 1, convert);
-	let array_appender = ArrayColumnAppender::new(inner_appender, true, false, c.definition_level + 1, c.repetition_level);
+	let inner_appender = FixedLenBinaryColumnAppender::new(convert);
+	let array_appender = ArrayColumnAppender::new(inner_appender, true, false);
 
 	mk_resolved::<TRow, TArr>(c.col_i, array_appender, arr_t)
 }
@@ -1086,8 +1071,6 @@ fn create_primitive_appender_simple<T: for <'a> FromSql<'a> + Clone + 'static, T
 	c: &ColumnInfo,
 ) -> DynColumnAppender<TRow>
 	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize + MyFrom<T> {
-	let mut c = c.clone();
-	c.definition_level += 1;
 	Box::new(create_primitive_appender::<T, TDataType, _, TRow>(&c, |x| TDataType::T::my_from(x)))
 }
 
@@ -1096,7 +1079,7 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + Clone + 'static, TDataTyp
 	convert: FConversion
 ) -> impl ColumnAppender<TRow>
 	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize {
-	let basic_appender: PrimitiveColumnAppender<T, TDataType, _> = PrimitiveColumnAppender::new(c.definition_level, c.repetition_level, convert);
+	let basic_appender: PrimitiveColumnAppender<T, TDataType, _> = PrimitiveColumnAppender::new(convert);
 	wrap_pg_row_reader(c, basic_appender)
 }
 
@@ -1104,19 +1087,17 @@ fn create_binary_appender<T: for <'a> FromSql<'a> + Clone + 'static, FConversion
 	c: &ColumnInfo,
 	convert: FConversion,
 ) -> DynColumnAppender<TRow> {
-	let inner = PrimitiveColumnAppender::<_, ByteArrayType, _>::new(c.definition_level, c.repetition_level, convert);
+	let inner = PrimitiveColumnAppender::<_, ByteArrayType, _>::new(convert);
 	Box::new(wrap_pg_row_reader(c, inner))
 }
 
-fn create_complex_appender<T: for <'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo, columns: Vec<DynColumnAppender<Arc<T>>>) -> impl ColumnAppender<TRow> {
-	let main_cp = DynamicMergedAppender::new(columns, c.definition_level + 1, c.repetition_level);
+fn create_complex_appender<T: for <'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo, columns: Vec<DynColumnAppender<Arc<T>>>, fields: Vec<(String, bool)>) -> impl ColumnAppender<TRow> {
+	let main_cp = DynamicMergedAppender::new(columns, fields);
 	wrap_pg_row_reader(c, RcWrapperAppender::new(main_cp))
 }
 
 fn create_array_appender<TRow: PgAbstractRow + Clone>(inner: DynColumnAppender<PgAny>, c: &ColumnInfo, warn_on_multidim: bool) -> impl ColumnAppender<TRow> {
-	let outer_dl = c.definition_level + 1;
-	debug_assert_eq!(outer_dl + 2, inner.max_dl());
-	let array_appender = ArrayColumnAppender::new(inner, true, true, outer_dl, c.repetition_level);
+	let array_appender = ArrayColumnAppender::new(inner, true, true);
 	let warned = AtomicBool::new(false);
 	let col_clone = c.clone();
 	let multidim_appender = array_appender.preprocess(move |x: Cow<PgMultidimArray<Option<PgAny>>>| {
@@ -1139,9 +1120,9 @@ fn create_array_appender<TRow: PgAbstractRow + Clone>(inner: DynColumnAppender<P
 }
 
 fn create_array_dim_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
-	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level + 1);
+	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>();
 	let dim_appender =
-		ArrayColumnAppender::new(int_appender, false, false, c.definition_level + 1, c.repetition_level)
+		ArrayColumnAppender::new(int_appender, false, false)
 			.preprocess(|x: Cow<PgMultidimArray<Option<T>>>| Cow::<Vec<Option<i32>>>::Owned(
 				x.dims.as_ref()
 					.map(|x| x.iter().map(|c| Some(*c)).collect())
@@ -1152,9 +1133,9 @@ fn create_array_dim_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: Pg
 
 
 fn create_array_lower_bound_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
-	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>(c.definition_level + 2, c.repetition_level + 1);
+	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>();
 	let dim_appender =
-		ArrayColumnAppender::new(int_appender, false, false, c.definition_level + 1, c.repetition_level)
+		ArrayColumnAppender::new(int_appender, false, false)
 			.preprocess(|x: Cow<PgMultidimArray<Option<T>>>| Cow::<Vec<Option<i32>>>::Owned(
 				match &x.lower_bounds {
 					_ if x.data.len() == 0 => Vec::new(),
@@ -1179,8 +1160,6 @@ struct ColumnInfo {
 	pub names: Arc<Vec<String>>,
 	pub col_i: usize,
 	pub is_array: bool,
-	pub definition_level: i16,
-	pub repetition_level: i16,
 }
 impl ColumnInfo {
 	pub fn root(col_i: usize, name: String) -> ColumnInfo {
@@ -1188,8 +1167,6 @@ impl ColumnInfo {
 			names: Arc::new(vec![name]),
 			col_i,
 			is_array: false,
-			definition_level: 0,
-			repetition_level: 0,
 		}
 	}
 
@@ -1202,8 +1179,6 @@ impl ColumnInfo {
 			}),
 			col_i,
 			is_array: false,
-			definition_level: self.definition_level + 1,
-			repetition_level: self.repetition_level,
 		}
 	}
 
@@ -1213,8 +1188,6 @@ impl ColumnInfo {
 			names: self.names.clone(),
 			col_i: self.col_i,
 			is_array: true,
-			definition_level: self.definition_level,
-			repetition_level: self.repetition_level + 1,
 		}
 	}
 
@@ -1227,3 +1200,6 @@ impl ColumnInfo {
 	}
 }
 
+fn field_metadata(t: &ParquetType) -> (String, bool) {
+	(t.name().to_owned(), t.get_basic_info().repetition() != Repetition::REQUIRED)
+}

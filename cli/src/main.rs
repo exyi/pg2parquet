@@ -8,7 +8,6 @@ use postgres_cloner::{SchemaSettingsArrayHandling, SchemaSettingsEnumHandling, S
 
 mod postgresutils;
 mod myfrom;
-mod level_index;
 mod parquetinfo;
 mod playground;
 mod parquet_writer;
