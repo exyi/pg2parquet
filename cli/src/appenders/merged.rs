@@ -1,4 +1,4 @@
-use std::{sync::Arc, borrow::Cow, marker::PhantomData};
+use std::{sync::Arc, marker::PhantomData};
 use super::{ColumnAppenderBase, ColumnAppender, DynColumnAppender};
 use arrow::array::{Array, ArrayRef, NullBufferBuilder, StructArray};
 use arrow::datatypes::{Field, Fields};
@@ -47,24 +47,23 @@ impl<T> ColumnAppenderBase for DynamicMergedAppender<T> {
 	}
 }
 
-impl<T: Clone> ColumnAppender<T> for DynamicMergedAppender<T> {
-	fn copy_value(&mut self, reader: Cow<T>) -> Result<usize, String> {
+impl<T> ColumnAppender<T> for DynamicMergedAppender<T> {
+	fn copy_value(&mut self, reader: &T) -> Result<usize, String> {
 		// Record a non-null struct row
 		self.present.append_non_null();
 		let mut total = 0;
-		let reader_r = reader.as_ref();
 		for c in self.columns.iter_mut() {
-			total += c.copy_value(Cow::Borrowed(reader_r))?;
+			total += c.copy_value(reader)?;
 		}
 		Ok(total)
 	}
 }
 
-pub fn new_static_merged_appender<T: Clone>() -> impl StaticMergedAppender<T> {
+pub fn new_static_merged_appender<T>() -> impl StaticMergedAppender<T> {
     StaticMergedAppenderNil { null_buffer: NullBufferBuilder::new(1024) }
 }
 
-pub trait StaticMergedAppender<T: Clone>: ColumnAppender<T> {
+pub trait StaticMergedAppender<T>: ColumnAppender<T> {
     fn to_struct_array(&mut self) -> Result<StructArray, String>;
 
     fn add_appender<A: ColumnAppender<T>>(self, name: impl Into<String>, nullable: bool, appender: A) -> StaticMergedAppenderImpl<T, A, Self>
@@ -73,7 +72,7 @@ pub trait StaticMergedAppender<T: Clone>: ColumnAppender<T> {
     }
 }
 
-pub struct StaticMergedAppenderImpl<T: Clone, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> {
+pub struct StaticMergedAppenderImpl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> {
     name: String,
     nullable: bool,
     pub appender: TAppender,
@@ -81,7 +80,7 @@ pub struct StaticMergedAppenderImpl<T: Clone, TAppender: ColumnAppender<T>, Next
     pub _dummy: PhantomData<T>
 }
 
-impl<T: Clone, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> ColumnAppenderBase for StaticMergedAppenderImpl<T, TAppender, Next> {
+impl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> ColumnAppenderBase for StaticMergedAppenderImpl<T, TAppender, Next> {
     fn write_null(&mut self) -> Result<usize, String> {
         let x = self.next.write_null()?;
         let y = self.appender.write_null()?;
@@ -93,15 +92,15 @@ impl<T: Clone, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> Colu
     }
 }
 
-impl<T: Clone, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> ColumnAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
-    fn copy_value(&mut self, reader: Cow<T>) -> Result<usize, String> {
-        let x = self.next.copy_value(Cow::Borrowed(reader.as_ref()))?;
+impl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> ColumnAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
+    fn copy_value(&mut self, reader: &T) -> Result<usize, String> {
+		let x = self.next.copy_value(reader)?;
         let y = self.appender.copy_value(reader)?;
         Ok(x + y)
     }
 }
 
-impl<T: Clone, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> StaticMergedAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
+impl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> StaticMergedAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
     fn to_struct_array(&mut self) -> Result<StructArray, String> {
 	let next_struct = self.next.to_struct_array()?;
 	let len = next_struct.len();
@@ -130,7 +129,7 @@ impl StaticMergedAppenderNil {
     }
 }
 
-impl<T: Clone> StaticMergedAppender<T> for StaticMergedAppenderNil {
+impl<T> StaticMergedAppender<T> for StaticMergedAppenderNil {
     fn to_struct_array(&mut self) -> Result<StructArray, String> {
 	Ok(self.to_struct_array())
     }
@@ -147,8 +146,8 @@ impl ColumnAppenderBase for StaticMergedAppenderNil {
     }
 }
 
-impl<T: Clone> ColumnAppender<T> for StaticMergedAppenderNil {
-    fn copy_value(&mut self, _reader: Cow<T>) -> Result<usize, String> {
+impl<T> ColumnAppender<T> for StaticMergedAppenderNil {
+    fn copy_value(&mut self, _reader: &T) -> Result<usize, String> {
 	self.null_buffer.append_non_null();
         Ok(0)
     }

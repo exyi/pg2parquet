@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io::Read, marker::PhantomData, sync::Arc};
+use std::{io::Read, marker::PhantomData, sync::Arc};
 use byteorder::{ReadBytesExt, BigEndian};
 use crate::pg_custom_types::{PgAnyRef, PgAbstractRow};
 use super::{ColumnAppenderBase, ColumnAppender};
@@ -45,7 +45,7 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 
 }
 
-impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FCopyTo> {
+impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FCopyTo> {
 	fn write_null(&mut self) -> Result<usize, String> {
 		Ok(self.append_null())
 	}
@@ -55,9 +55,9 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppende
 	}
 }
 
-impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FCopyTo> {
-	fn copy_value(&mut self, value: Cow<TPg>) -> Result<usize, String> {
-		let byte_size = self.append(value.as_ref());
+impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FCopyTo> {
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		let byte_size = self.append(value);
 
 		Ok(byte_size)
 	}
@@ -65,7 +65,7 @@ impl<TPg: Clone, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ColumnAppende
 
 /// Directly appends the bytes of the Postgres wire representation
 /// Works for TEXT (and similar), BYTES, JSON (not JSONB!!)
-pub fn create_pg_raw_appender<TRow: PgAbstractRow + Clone>(column_index: usize) -> impl ColumnAppender<TRow> {
+pub fn create_pg_raw_appender<TRow: PgAbstractRow>(column_index: usize) -> impl ColumnAppender<TRow> {
 	let a = ByteArrayColumnAppender::new(move |row: &TRow, buffer: &mut Vec<u8>| {
 		if let Some(value) = row.ab_get::<Option<PgAnyRef>>(column_index) {
 			buffer.extend_from_slice(value.value);
@@ -77,7 +77,7 @@ pub fn create_pg_raw_appender<TRow: PgAbstractRow + Clone>(column_index: usize) 
 	a
 }
 
-pub fn create_jsonb_appender<TRow: PgAbstractRow + Clone>(column_index: usize) -> impl ColumnAppender<TRow> {
+pub fn create_jsonb_appender<TRow: PgAbstractRow>(column_index: usize) -> impl ColumnAppender<TRow> {
 	let a = ByteArrayColumnAppender::new(move |row: &TRow, buffer: &mut Vec<u8>| {
 		if let Some(value) = row.ab_get::<Option<PgAnyRef>>(column_index) {
 			debug_assert_eq!(value.ty, postgres::types::Type::JSONB);

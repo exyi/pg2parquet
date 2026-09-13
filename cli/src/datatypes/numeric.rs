@@ -1,10 +1,8 @@
-use std::borrow::Cow;
-
 use parquet::data_type::{ByteArray, ByteArrayType};
 use pg_bigdecimal::{PgNumeric, BigDecimal, BigInt};
 use bigdecimal::ToPrimitive;
 
-use crate::appenders::{ByteArrayColumnAppender, ColumnAppender, ColumnAppenderBase, PreprocessAppender, PreprocessExt, PrimitiveParquetType, UnwrapOptionAppender, new_autoconv_byte_array_binary_appender, new_autoconv_generic_appender};
+use crate::appenders::{ByteArrayColumnAppender, ColumnAppender, PreprocessAppender, PrimitiveParquetType, UnwrapOptionAppender, new_autoconv_generic_appender};
 use crate::myfrom::MyFrom;
 // Arrow export
 use arrow::array::{ArrayRef, BinaryBuilder};
@@ -31,11 +29,8 @@ pub fn convert_decimal_to_int<Int: TryFrom<BigInt>>(d: &BigDecimal, scale: i32, 
 
 pub fn new_decimal_bytes_appender(precision: u32, scale: i32) -> impl ColumnAppender<PgNumeric> {
 	let inner = ByteArrayColumnAppender::<Vec<u8>, _>::new(|v| &v);
-	PreprocessAppender::new(UnwrapOptionAppender::new(inner), move |value: Cow<PgNumeric>| {
-		match &value.n {
-			Some(n) => Cow::Owned(Some(convert_decimal_to_bytes(n, scale, precision))),
-			None => Cow::Owned(None)
-		}
+	PreprocessAppender::new(UnwrapOptionAppender::new(inner), move |value: &PgNumeric| {
+		value.n.as_ref().map(|n| convert_decimal_to_bytes(n, scale, precision))
 	})
 }
 
@@ -44,11 +39,8 @@ pub fn new_decimal_int_appender<Int: TryFrom<BigInt> + Clone, TPq: PrimitiveParq
 		TPq::T: Clone + crate::appenders::RealMemorySize,
 		TPq::T: MyFrom<Int>{
 	let inner = UnwrapOptionAppender::new(new_autoconv_generic_appender::<Int, TPq>());
-	PreprocessAppender::new(inner, move |value: Cow<PgNumeric>| {
-		match &value.n {
-			Some(n) => Cow::Owned(convert_decimal_to_int(n, scale, precision)),
-			None => Cow::Owned(None),
-		}
+	PreprocessAppender::new(inner, move |value: &PgNumeric| {
+		value.n.as_ref().and_then(|n| convert_decimal_to_int::<Int>(n, scale, precision))
 	})
 }
 

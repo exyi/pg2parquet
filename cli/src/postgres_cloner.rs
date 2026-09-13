@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::{Display, Write as _};
 use std::io::{self, Write};
@@ -29,14 +28,14 @@ use arrow::record_batch::RecordBatch;
 use crate::datatypes::array::{PgMultidimArray, PgMultidimArrayLowerBounds};
 use crate::datatypes::pgvector::{self, PgSparseVector};
 use crate::PostgresConnArgs;
-use crate::appenders::{ArrayColumnAppender, BasicPgRowColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, FixedLenBinaryColumnAppender, PreprocessAppender, PreprocessExt, PrimitiveColumnAppender, PrimitiveParquetType, RcWrapperAppender, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender, new_autoconv_generic_appender, new_static_merged_appender};
+use crate::appenders::{ArrayColumnAppender, BasicPgRowColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, FixedLenBinaryColumnAppender, PreprocessAppender, PreprocessExt, PrimitiveColumnAppender, PrimitiveParquetType, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender, new_autoconv_generic_appender, new_static_merged_appender};
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::{new_decimal_bytes_appender, new_decimal_int_appender};
 use crate::myfrom::{MyFrom, self};
 use crate::parquet_writer::{WriterStats, WriterSettings};
-use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef, UnclonableHack};
+use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef};
 
 type ResolvedColumn<TRow> = (DynColumnAppender<TRow>, ParquetType);
 
@@ -423,7 +422,7 @@ pub fn execute_copy(
 			for (row_i, r) in rows.iterator().enumerate() {
 				let row = Arc::new(r.map_err(|err| format!("Error loading row from postgres: {err}"))?);
 				for (col_i, app) in col_appenders.iter_mut().enumerate() {
-					app.copy_value(Cow::Borrowed(&row))
+					app.copy_value(&row)
 						.map_err(|e| format!("Failed to row {row_i} column {col_i}: {e}"))?;
 				}
 				batch_rows += 1; 
@@ -572,7 +571,7 @@ fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedCol
 	Ok((merged_appender, struct_type))
 }
 
-fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
+fn map_schema_column<TRow: PgAbstractRow + 'static>(
 	t: &PgType,
 	c: &ColumnInfo,
 	settings: &SchemaSettings,
@@ -614,7 +613,7 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 			let array_inner = ArrayColumnAppender::new(element_appender, true, true);
 			let warned = AtomicBool::new(false);
 			let col_clone = c.clone();
-			let array_for_value = array_inner.preprocess(move |x: Cow<PgMultidimArray<Option<PgAny>>>| {
+			let array_for_value = array_inner.preprocess_ref(move |x: &PgMultidimArray<Option<PgAny>>| {
 				if plain_schema && x.dims.is_some() && !warned.load(Ordering::Relaxed) {
 					if !warned.fetch_or(true, Ordering::SeqCst) {
 						eprintln!("Warning: Column {} contains a {}-dimensional array which will be flattened in Parquet (i.e. {} -> {}). Use --array-handling=dimensions, include another column with the PostgreSQL array dimensions.",
@@ -625,28 +624,25 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 						)
 					}
 				}
-				match x {
-					Cow::Owned(x) => Cow::Owned(x.data),
-					Cow::Borrowed(x) => Cow::Borrowed(&x.data)
-				}
+				&x.data
 			});
 
 			// Build dims and lower_bound appenders for the logical value type
 			let int_appender = new_autoconv_generic_appender::<i32, Int32Type>();
 			let dims_for_value = ArrayColumnAppender::new(int_appender, false, false)
-				.preprocess(|x: Cow<PgMultidimArray<Option<PgAny>>>| Cow::<Vec<Option<i32>>>::Owned(
+				.preprocess(|x: &PgMultidimArray<Option<PgAny>>|
 					x.dims.as_ref()
 						.map(|x| x.iter().map(|c| Some(*c)).collect())
 						.unwrap_or_else(|| if x.data.len() == 0 { Vec::new() } else { vec![Some(x.data.len() as i32)] })
-				));
+				);
 			let lb_for_value = ArrayColumnAppender::new(new_autoconv_generic_appender::<i32, Int32Type>(), false, false)
-				.preprocess(|x: Cow<PgMultidimArray<Option<PgAny>>>| Cow::<Vec<Option<i32>>>::Owned(
+				.preprocess(|x: &PgMultidimArray<Option<PgAny>>|
 					match &x.lower_bounds {
 						_ if x.data.len() == 0 => Vec::new(),
 						PgMultidimArrayLowerBounds::Const(c) => vec![Some(*c); x.dims.as_ref().map(|x| x.len()).unwrap_or(1)],
 						PgMultidimArrayLowerBounds::PerDim(v) => v.iter().map(|x| Some(*x)).collect()
 					}
-				));
+				);
 
 			let dim_schema = make_list_schema("dims", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: false })).build().unwrap());
 			let lb_schema = make_list_schema("lower_bound", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: true })).build().unwrap());
@@ -691,8 +687,8 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 			map_schema_column(element_type, c, settings)
 		},
 		&Kind::Range(ref element_type) => {
-			let col_lower = map_schema_column::<UnclonableHack<PgRawRange>>(element_type, &c.nest("lower", 0), settings)?;
-			let col_upper = map_schema_column::<UnclonableHack<PgRawRange>>(element_type, &c.nest("upper", 1), settings)?;
+			let col_lower = map_schema_column::<PgRawRange>(element_type, &c.nest("lower", 0), settings)?;
+			let col_upper = map_schema_column::<PgRawRange>(element_type, &c.nest("upper", 1), settings)?;
 
 			let schema = ParquetType::group_type_builder(c.col_name())
 				.with_fields(vec![
@@ -707,17 +703,16 @@ fn map_schema_column<TRow: PgAbstractRow + Clone + 'static>(
 				.unwrap();
 
 			// Build a dynamic merged appender so Arrow Struct export is supported
-			let mut children: Vec<DynColumnAppender<UnclonableHack<PgRawRange>>> = Vec::new();
+			let mut children: Vec<DynColumnAppender<PgRawRange>> = Vec::new();
 			children.push(col_lower.0);
 			children.push(col_upper.0);
 			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>()
-				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.lower_inclusive))));
+				.preprocess(|r: &PgRawRange| r.lower_inclusive)));
 			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>()
-				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.upper_inclusive))));
+				.preprocess(|r: &PgRawRange| r.upper_inclusive)));
 			children.push(Box::new(new_autoconv_generic_appender::<bool, BoolType>()
-				.preprocess(|r: Cow<UnclonableHack<PgRawRange>>| Cow::Owned(r.0.is_empty))));
-			let dynm = DynamicMergedAppender::new(children, schema.get_fields().iter().map(|f| field_metadata(f)).collect())
-				.preprocess(|x: Cow<PgRawRange>| match x { Cow::Owned(x) => Cow::Owned(UnclonableHack(x)), Cow::Borrowed(_) => panic!() });
+				.preprocess(|r: &PgRawRange| r.is_empty)));
+			let dynm = DynamicMergedAppender::new(children, schema.get_fields().iter().map(|f| field_metadata(f)).collect());
 
 			let appender_dyn = wrap_pg_row_reader(c, dynm);
 
@@ -760,7 +755,7 @@ fn make_list_schema(name: &str, repetition: Repetition, element_schema: ParquetT
 		.build().unwrap()
 }
 
-fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
+fn map_simple_type<TRow: PgAbstractRow + 'static>(
 	t: &PgType,
 	c: &ColumnInfo,
 	s: &SchemaSettings,
@@ -832,11 +827,11 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 					// Build a dynamic merged appender so Arrow Struct export is supported
 					let mut children: Vec<DynColumnAppender<PgInterval>> = Vec::new();
 					children.push(Box::new(new_autoconv_generic_appender::<i32, Int32Type>()
-						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.months))));
+						.preprocess(|i: &PgInterval| i.months)));
 					children.push(Box::new(new_autoconv_generic_appender::<i32, Int32Type>()
-						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.days))));
+						.preprocess(|i: &PgInterval| i.days)));
 					children.push(Box::new(new_autoconv_generic_appender::<i64, Int64Type>()
-						.preprocess(|i: Cow<PgInterval>| Cow::Owned(i.microseconds))));
+						.preprocess(|i: &PgInterval| i.microseconds)));
 					let dynm = DynamicMergedAppender::new(children, t.get_fields().iter().map(|f| field_metadata(f)).collect());
 					(Box::new(wrap_pg_row_reader(c, dynm)), t)
 				},
@@ -846,18 +841,18 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 
 
 		// pgvector extension: vector = 32-bit float array, halfvec = 16-bit float array, sparsevec = sparse f32 vector
-		"vector" => resolve_vector_conv::<pgvector::PgF32Vector, f32, FloatType, _, TRow>(name, c, None, None, None, |v| v),
+		"vector" => resolve_vector_conv::<pgvector::PgF32Vector, f32, FloatType, _, TRow>(name, c, None, None, None, |v| *v),
 		"halfvec" => match s.float16_handling {
 			SchemaSettingsFloat16Handling::Float16 =>
 				resolve_vector_binary_conv::<2, pgvector::PgF16Vector, f16, _, TRow>(name, c, Some(LogicalType::Float16), None, |v| Some(v.to_le_bytes())),
 			SchemaSettingsFloat16Handling::Float32 =>
-				resolve_vector_conv::<pgvector::PgF16Vector, f16, FloatType, _, TRow>(name, c, None, None, None, |v| v.into())
+				resolve_vector_conv::<pgvector::PgF16Vector, f16, FloatType, _, TRow>(name, c, None, None, None, |v| (*v).into())
 		},
 		"sparsevec" => {
 			let inner_appender = new_static_merged_appender::<(i32, f32)>()
 				// index+1, because pgvector uses 0-based in binary, but 1-based in text and operators
-				.add_appender("key", false, PrimitiveColumnAppender::<_, Int32Type, _>::new(|v: (i32, f32)| v.0 + 1))
-				.add_appender("value", false, PrimitiveColumnAppender::<_, FloatType, _>::new(|v: (i32, f32)| v.1));
+				.add_appender("key", false, PrimitiveColumnAppender::<_, Int32Type, _>::new(|v: &(i32, f32)| v.0 + 1))
+				.add_appender("value", false, PrimitiveColumnAppender::<_, FloatType, _>::new(|v: &(i32, f32)| v.1));
 
 			let schema = ParquetType::group_type_builder(name)
 				.with_repetition(Repetition::OPTIONAL)
@@ -887,7 +882,7 @@ fn map_simple_type<TRow: PgAbstractRow + Clone + 'static>(
 	})
 }
 
-fn resolve_numeric<TRow: PgAbstractRow + Clone + 'static>(s: &SchemaSettings, name: &str, c: &ColumnInfo) -> Result<ResolvedColumn<TRow>, String> {
+fn resolve_numeric<TRow: PgAbstractRow + 'static>(s: &SchemaSettings, name: &str, c: &ColumnInfo) -> Result<ResolvedColumn<TRow>, String> {
 	match s.numeric_handling {
 		SchemaSettingsNumericHandling::Decimal => {
 			let scale = s.decimal_scale;
@@ -922,24 +917,24 @@ fn resolve_numeric<TRow: PgAbstractRow + Clone + 'static>(s: &SchemaSettings, na
 		SchemaSettingsNumericHandling::Float32 =>
 			Ok(resolve_primitive::<PgNumeric, FloatType, _>(name, c, None, None)),
 		SchemaSettingsNumericHandling::String =>
-			Ok(resolve_binary_conv::<PgNumeric, _, _>(name, c, None, Some(LogicalType::String), None, |v: PgNumeric| match v.n {
+			Ok(resolve_binary_conv::<PgNumeric, _, _>(name, c, None, Some(LogicalType::String), None, |v: &PgNumeric| match &v.n {
 				Some(n) => ByteArray::my_from(n.to_string()),
 				None => ByteArray::my_from("NaN".to_string())
 			}))
 	}
 }
 
-fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + Clone + 'static>(
+fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>
 ) -> ResolvedColumn<TRow>
 	where TDataType: PrimitiveParquetType, TDataType::T : Copy + RealMemorySize + MyFrom<T> {
-	resolve_primitive_conv::<T, TDataType, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v))
+	resolve_primitive_conv::<T, TDataType, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v.clone()))
 }
 
-fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone + 'static>(
+fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	length: Option<i32>,
@@ -960,17 +955,17 @@ fn logical_type_requests_utf8(logical_type: Option<&LogicalType>) -> bool {
 	matches!(logical_type, Some(LogicalType::String) | Some(LogicalType::Enum) | Some(LogicalType::Json))
 }
 
-fn resolve_binary<T: for<'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + Clone + 'static>(
+fn resolve_binary<T: for<'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>
 ) -> ResolvedColumn<TRow>
 	where ByteArray: MyFrom<T> {
-	resolve_binary_conv::<T, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v))
+	resolve_binary_conv::<T, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v.clone()))
 }
 
-fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn(T) -> ByteArray + 'static, TRow: PgAbstractRow + Clone + 'static>(
+fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn(&T) -> ByteArray + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	length: Option<i32>,
@@ -986,7 +981,7 @@ fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn
 	(cp, t)
 }
 
-fn resolve_fixlen_binary<const N: usize, T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn(&T) -> Option<[u8; N]> + 'static, TRow: PgAbstractRow + Clone + 'static>(
+fn resolve_fixlen_binary<const N: usize, T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn(&T) -> Option<[u8; N]> + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
@@ -1001,7 +996,7 @@ fn resolve_fixlen_binary<const N: usize, T: for<'a> FromSql<'a> + Clone + 'stati
 	mk_resolved::<TRow, T>(c.col_i, appender, t)
 }
 
-fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> + 'static, T: Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone + 'static>(
+fn resolve_vector_conv<TArr, T: 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	length: Option<i32>,
@@ -1009,7 +1004,9 @@ fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> 
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
 ) -> ResolvedColumn<TRow>
-	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize {
+	where TArr: for<'a> FromSql<'a> + Clone + 'static,
+	      for<'a> &'a TArr: IntoIterator<Item = &'a T>,
+	      TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize {
 
 	let t =
 		build_primitive_pq_type("element", TDataType::get_physical_type(), length, logical_type, conv_type)
@@ -1024,13 +1021,15 @@ fn resolve_vector_conv<TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> 
 	mk_resolved::<TRow, TArr>(c.col_i, array_appender, arr_t)
 }
 
-fn resolve_vector_binary_conv<const N: usize, TArr: for<'a> FromSql<'a> + Clone + IntoIterator<Item=T> + 'static, T: Clone + 'static, FConversion: Fn(&T) -> Option<[u8; N]> + 'static, TRow: PgAbstractRow + Clone + 'static>(
+fn resolve_vector_binary_conv<const N: usize, TArr, T: Clone + 'static, FConversion: Fn(&T) -> Option<[u8; N]> + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
-) -> ResolvedColumn<TRow> {
+) -> ResolvedColumn<TRow>
+	where TArr: for<'a> FromSql<'a> + Clone + 'static,
+	      for<'a> &'a TArr: IntoIterator<Item = &'a T> {
 
 	let t =
 		build_primitive_pq_type("element", parquet::basic::Type::FIXED_LEN_BYTE_ARRAY, Some(N as i32), logical_type, conv_type)
@@ -1067,14 +1066,14 @@ fn build_primitive_pq_type(name: &'_ str, data_type: parquet::basic::Type, lengt
 	t.with_logical_type(logical_type)
 }
 
-fn create_primitive_appender_simple<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + Clone + 'static>(
+fn create_primitive_appender_simple<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + 'static>(
 	c: &ColumnInfo,
 ) -> DynColumnAppender<TRow>
 	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize + MyFrom<T> {
-	Box::new(create_primitive_appender::<T, TDataType, _, TRow>(&c, |x| TDataType::T::my_from(x)))
+	Box::new(create_primitive_appender::<T, TDataType, _, TRow>(&c, |x| TDataType::T::my_from(x.clone())))
 }
 
-fn create_primitive_appender<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(T) -> TDataType::T + 'static, TRow: PgAbstractRow + Clone>(
+fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + 'static, TRow: PgAbstractRow>(
 	c: &ColumnInfo,
 	convert: FConversion
 ) -> impl ColumnAppender<TRow>
@@ -1083,7 +1082,7 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + Clone + 'static, TDataTyp
 	wrap_pg_row_reader(c, basic_appender)
 }
 
-fn create_binary_appender<T: for <'a> FromSql<'a> + Clone + 'static, FConversion: Fn(T) -> ByteArray + 'static, TRow: PgAbstractRow + Clone + 'static>(
+fn create_binary_appender<T: for <'a> FromSql<'a> + 'static, FConversion: Fn(&T) -> ByteArray + 'static, TRow: PgAbstractRow + 'static>(
 	c: &ColumnInfo,
 	convert: FConversion,
 ) -> DynColumnAppender<TRow> {
@@ -1091,16 +1090,16 @@ fn create_binary_appender<T: for <'a> FromSql<'a> + Clone + 'static, FConversion
 	Box::new(wrap_pg_row_reader(c, inner))
 }
 
-fn create_complex_appender<T: for <'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo, columns: Vec<DynColumnAppender<Arc<T>>>, fields: Vec<(String, bool)>) -> impl ColumnAppender<TRow> {
+fn create_complex_appender<T: for <'a> FromSql<'a> + PgAbstractRow + 'static, TRow: PgAbstractRow>(c: &ColumnInfo, columns: Vec<DynColumnAppender<T>>, fields: Vec<(String, bool)>) -> impl ColumnAppender<TRow> {
 	let main_cp = DynamicMergedAppender::new(columns, fields);
-	wrap_pg_row_reader(c, RcWrapperAppender::new(main_cp))
+	wrap_pg_row_reader(c, main_cp)
 }
 
-fn create_array_appender<TRow: PgAbstractRow + Clone>(inner: DynColumnAppender<PgAny>, c: &ColumnInfo, warn_on_multidim: bool) -> impl ColumnAppender<TRow> {
+fn create_array_appender<TRow: PgAbstractRow>(inner: DynColumnAppender<PgAny>, c: &ColumnInfo, warn_on_multidim: bool) -> impl ColumnAppender<TRow> {
 	let array_appender = ArrayColumnAppender::new(inner, true, true);
 	let warned = AtomicBool::new(false);
 	let col_clone = c.clone();
-	let multidim_appender = array_appender.preprocess(move |x: Cow<PgMultidimArray<Option<PgAny>>>| {
+	let multidim_appender = array_appender.preprocess_ref(move |x: &PgMultidimArray<Option<PgAny>>| {
 		if warn_on_multidim && x.dims.is_some() && !warned.load(Ordering::Relaxed) {
 			if !warned.fetch_or(true, Ordering::SeqCst) {
 				eprintln!("Warning: Column {} contains a {}-dimensional array which will be flattened in Parquet (i.e. {} -> {}). Use --array-handling=dimensions, include another column with the PostgreSQL array dimensions.",
@@ -1111,46 +1110,43 @@ fn create_array_appender<TRow: PgAbstractRow + Clone>(inner: DynColumnAppender<P
 				)
 			}
 		}
-		match x {
-			Cow::Owned(x) => Cow::Owned(x.data),
-			Cow::Borrowed(x) => Cow::Borrowed(&x.data)
-		}
+		&x.data
 	});
 	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<PgAny>>>(c, multidim_appender)
 }
 
-fn create_array_dim_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
+fn create_array_dim_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
 	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>();
 	let dim_appender =
 		ArrayColumnAppender::new(int_appender, false, false)
-			.preprocess(|x: Cow<PgMultidimArray<Option<T>>>| Cow::<Vec<Option<i32>>>::Owned(
+			.preprocess(|x: &PgMultidimArray<Option<T>>|
 				x.dims.as_ref()
 					.map(|x| x.iter().map(|c| Some(*c)).collect())
 					.unwrap_or_else(|| if x.data.len() == 0 { Vec::new() } else { vec![Some(x.data.len() as i32)] })
-			));
+			);
 	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<T>>>(c, dim_appender)
 }
 
 
-fn create_array_lower_bound_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow + Clone>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
+fn create_array_lower_bound_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
 	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>();
 	let dim_appender =
 		ArrayColumnAppender::new(int_appender, false, false)
-			.preprocess(|x: Cow<PgMultidimArray<Option<T>>>| Cow::<Vec<Option<i32>>>::Owned(
+			.preprocess(|x: &PgMultidimArray<Option<T>>|
 				match &x.lower_bounds {
 					_ if x.data.len() == 0 => Vec::new(),
 					PgMultidimArrayLowerBounds::Const(c) => vec![Some(*c); x.dims.as_ref().map(|x| x.len()).unwrap_or(1)],
 					PgMultidimArrayLowerBounds::PerDim(v) => v.iter().map(|x| Some(*x)).collect()
 				}
-			));
+			);
 	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<T>>>(c, dim_appender)
 }
 
-fn wrap_pg_row_reader<TRow: PgAbstractRow + Clone, T: Clone + for <'a> FromSql<'a>>(c: &ColumnInfo, a: impl ColumnAppender<T>) -> impl ColumnAppender<TRow> {
+fn wrap_pg_row_reader<TRow: PgAbstractRow, T: for <'a> FromSql<'a>>(c: &ColumnInfo, a: impl ColumnAppender<T>) -> impl ColumnAppender<TRow> {
 	BasicPgRowColumnAppender::new(c.col_i, a)
 }
 
-fn mk_resolved<TRow: PgAbstractRow + Clone, T: Clone + for <'a> FromSql<'a> + 'static>(c: usize, a: impl ColumnAppender<T> + 'static, t: ParquetType) -> ResolvedColumn<TRow> {
+fn mk_resolved<TRow: PgAbstractRow, T: for <'a> FromSql<'a> + 'static>(c: usize, a: impl ColumnAppender<T> + 'static, t: ParquetType) -> ResolvedColumn<TRow> {
 	let pg_app = BasicPgRowColumnAppender::new(c, a);
 	(Box::new(pg_app), t)
 }

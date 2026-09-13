@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, borrow::Cow};
+use std::marker::PhantomData;
 
 use super::{ColumnAppender, ColumnAppenderBase};
 // Arrow support for exporting LIST arrays via inner appender
@@ -7,7 +7,7 @@ use arrow::array::{ArrayRef, ListArray, NullBufferBuilder, OffsetBufferBuilder};
 use arrow::datatypes::Field as ArrowField;
 use arrow::buffer::{OffsetBuffer, NullBuffer};
 
-pub struct ArrayColumnAppender<TPg: Clone, TInner>
+pub struct ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
 	inner: TInner,
 	element_name: String,
@@ -19,7 +19,7 @@ pub struct ArrayColumnAppender<TPg: Clone, TInner>
 	_dummy: PhantomData<TPg>,
 }
 
-impl<TPg: Clone, TInner> ArrayColumnAppender<TPg, TInner>
+impl<TPg, TInner> ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
 	pub fn new(inner: TInner, allow_null: bool, allow_element_null: bool) -> Self {
 		ArrayColumnAppender {
@@ -35,7 +35,7 @@ impl<TPg: Clone, TInner> ArrayColumnAppender<TPg, TInner>
 	}
 }
 
-impl<TPg: Clone, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner> 
+impl<TPg, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
 	fn write_null(&mut self) -> Result<usize, String> {
 		self.offsets_builder.push_length(0);
@@ -59,45 +59,36 @@ impl<TPg: Clone, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner>
 }
 
 pub trait Nullable<T> {
-	const IS_NULLABLE: bool;
-	fn is_null(&self) -> bool;
-	fn as_option(self) -> Option<T>;
+	fn as_option(&self) -> Option<&T>;
 }
 
 impl<T> Nullable<T> for Option<T> {
-	const IS_NULLABLE: bool = true;
-	fn is_null(&self) -> bool { self.is_none() }
-	fn as_option(self) -> Option<T> { self }
+	fn as_option(&self) -> Option<&T> { self.as_ref() }
 }
 
 impl<T> Nullable<T> for T {
-	const IS_NULLABLE: bool = false;
-	fn is_null(&self) -> bool { false }
-	fn as_option(self) -> Option<T> { Some(self) }
+	fn as_option(&self) -> Option<&T> { Some(self) }
 }
 
-impl<'a, TPg: Clone, TInner, TArray: Clone, TItem> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
+impl<TPg, TInner, TArray, TItem> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg>,
-		  TArray: IntoIterator<Item = TItem> + Clone,
+		  for<'a> &'a TArray: IntoIterator<Item = &'a TItem>,
 		  TItem: Nullable<TPg> {
-	fn copy_value(&mut self, array: Cow<TArray>) -> Result<usize, String> {
+	fn copy_value(&mut self, array: &TArray) -> Result<usize, String> {
 		let mut bytes_written = 0;
 
 		let mut element_count = 0;
 
-		for value in array.into_owned().into_iter() { // TODO: avoid copying
-			if TItem::IS_NULLABLE && self.allow_element_null {
-				bytes_written += self.inner.copy_value_opt(Cow::Owned(value.as_option()))?;
-				element_count += 1;
-			} else {
-				match value.as_option() {
-					Some(value) => {
-						bytes_written += self.inner.copy_value(Cow::Owned(value))?;
-						element_count += 1;
-					},
-					None => { debug_assert!(false) }// skip
+		for value in array {
+			match value.as_option() {
+				Some(value) => bytes_written += self.inner.copy_value(value)?,
+				None if self.allow_element_null => bytes_written += self.inner.write_null()?,
+				None => {
+					debug_assert!(false, "null element in a required list");
+					continue;
 				}
 			}
+			element_count += 1;
 		}
 
 		self.offsets_builder.push_length(element_count);

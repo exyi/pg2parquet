@@ -1,4 +1,4 @@
-use std::{borrow::Cow, marker::PhantomData, sync::Arc};
+use std::{marker::PhantomData, sync::Arc};
 use arrow::{array::{ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, UInt16Builder, UInt16DictionaryArray}, datatypes::UInt32Type};
 use super::{ColumnAppender, ColumnAppenderBase};
 
@@ -22,7 +22,7 @@ impl<TPg, FConversion> DictionaryColumnAppender<TPg, FConversion>
 	}
 }
 
-impl<TPg: Clone, FConversion> ColumnAppenderBase for DictionaryColumnAppender<TPg, FConversion>
+impl<TPg, FConversion> ColumnAppenderBase for DictionaryColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
 	fn write_null(&mut self) -> Result<usize, String> {
@@ -36,12 +36,11 @@ impl<TPg: Clone, FConversion> ColumnAppenderBase for DictionaryColumnAppender<TP
 	}
 }
 
-impl<TPg: Clone, FConversion> ColumnAppender<TPg> for DictionaryColumnAppender<TPg, FConversion>
+impl<TPg, FConversion> ColumnAppender<TPg> for DictionaryColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
-	fn copy_value(&mut self, value: Cow<TPg>) -> Result<usize, String> {
-		let value_ref = value.as_ref();
-		let bytes = (self.conversion)(value_ref);
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		let bytes = (self.conversion)(value);
 		let byte_size = bytes.len();
 		self.builder.append_value(bytes);
 		Ok(byte_size + 1)
@@ -74,7 +73,7 @@ impl<TPg, FConversion> SmallEnumColumnAppender<TPg, FConversion>
 	}
 }
 
-impl<TPg: Clone, FConversion> ColumnAppenderBase for SmallEnumColumnAppender<TPg, FConversion>
+impl<TPg, FConversion> ColumnAppenderBase for SmallEnumColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> u16,
 {
 	fn write_null(&mut self) -> Result<usize, String> {
@@ -89,14 +88,12 @@ impl<TPg: Clone, FConversion> ColumnAppenderBase for SmallEnumColumnAppender<TPg
 	}
 }
 
-impl<TPg: Clone, FConversion> ColumnAppender<TPg> for SmallEnumColumnAppender<TPg, FConversion>
+impl<TPg, FConversion> ColumnAppender<TPg> for SmallEnumColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> u16,
 {
-	fn copy_value(&mut self, value: Cow<TPg>) -> Result<usize, String> {
-		let value_ref = value.as_ref();
-		let case = (self.conversion)(value_ref);
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		let case = (self.conversion)(value);
 		self.builder.append_value(case);
 		Ok(2 + 1)
 	}
 }
-

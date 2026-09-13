@@ -1,4 +1,4 @@
-use std::{borrow::Cow, marker::PhantomData, sync::Arc};
+use std::{marker::PhantomData, sync::Arc};
 use arrow::array::{ArrayBuilder, ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder};
 use parquet::data_type::{DataType, ByteArray as PqByteArray, ByteArrayType};
 use crate::myfrom::MyFrom;
@@ -33,7 +33,7 @@ pub struct PrimitiveColumnAppender<TPg, TPq, FConversion>
 	where
 		TPq: PrimitiveParquetType,
 		TPq::T: RealMemorySize,
-		FConversion: Fn(TPg) -> TPq::T,
+		FConversion: Fn(&TPg) -> TPq::T,
 {
 	builder: TPq::Builder,
 
@@ -42,19 +42,20 @@ pub struct PrimitiveColumnAppender<TPg, TPq, FConversion>
 	_pq: PhantomData<TPq>,
 }
 
-pub fn new_autoconv_generic_appender<TPg, TPq>() -> PrimitiveColumnAppender<TPg, TPq, impl Fn(TPg) -> TPq::T>
+pub fn new_autoconv_generic_appender<TPg, TPq>() -> PrimitiveColumnAppender<TPg, TPq, impl Fn(&TPg) -> TPq::T>
 	where
+		TPg: Clone,
 		TPq: PrimitiveParquetType,
 		TPq::T: Clone + RealMemorySize + MyFrom<TPg>,
 {
-	PrimitiveColumnAppender::new(|value: TPg| MyFrom::my_from(value))
+	PrimitiveColumnAppender::new(|value: &TPg| MyFrom::my_from((*value).clone()))
 }
 
 impl<TPg, TPq, FConversion> PrimitiveColumnAppender<TPg, TPq, FConversion>
 	where
 		TPq: PrimitiveParquetType,
 		TPq::T: RealMemorySize,
-		FConversion: Fn(TPg) -> TPq::T,
+		FConversion: Fn(&TPg) -> TPq::T,
 {
 	pub fn new(conversion: FConversion) -> Self {
 		PrimitiveColumnAppender {
@@ -66,7 +67,7 @@ impl<TPg, TPq, FConversion> PrimitiveColumnAppender<TPg, TPq, FConversion>
 		}
 	}
 
-	pub fn convert(&self, value: TPg) -> TPq::T {
+	pub fn convert(&self, value: &TPg) -> TPq::T {
 		(self.conversion)(value)
 	}
 }
@@ -75,7 +76,7 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for PrimitiveColumnAppender<TPg, 
 	where
 		TPq: PrimitiveParquetType,
 		TPq::T: RealMemorySize,
-		FConversion: Fn(TPg) -> TPq::T,
+		FConversion: Fn(&TPg) -> TPq::T,
 {
 	fn write_null(&mut self) -> Result<usize, String> {
 		self.builder.extend([None]);
@@ -88,14 +89,14 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for PrimitiveColumnAppender<TPg, 
 	}
 }
 
-impl<TPg: Clone, TPq, FConversion> ColumnAppender<TPg> for PrimitiveColumnAppender<TPg, TPq, FConversion>
+impl<TPg, TPq, FConversion> ColumnAppender<TPg> for PrimitiveColumnAppender<TPg, TPq, FConversion>
 	where
 		TPq: PrimitiveParquetType,
 		TPq::T: RealMemorySize,
-		FConversion: Fn(TPg) -> TPq::T,
+		FConversion: Fn(&TPg) -> TPq::T,
 {
-	fn copy_value(&mut self, value: Cow<TPg>) -> Result<usize, String> {
-		let pq_value = self.convert(value.into_owned());
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		let pq_value = self.convert(value);
 		let byte_size = pq_value.real_memory_size();
 		self.builder.extend([Some(pq_value)]);
 		Ok(byte_size + 1)
@@ -124,7 +125,7 @@ impl<TPg, FConversion> ByteArrayColumnAppender<TPg, FConversion>
 	}
 }
 
-impl<TPg: Clone, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FConversion>
+impl<TPg, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
 	fn write_null(&mut self) -> Result<usize, String> {
@@ -138,12 +139,11 @@ impl<TPg: Clone, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TPg
 	}
 }
 
-impl<TPg: Clone, FConversion> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FConversion>
+impl<TPg, FConversion> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
-	fn copy_value(&mut self, value: Cow<TPg>) -> Result<usize, String> {
-		let value_ref = value.as_ref();
-		let bytes = (self.conversion)(value_ref);
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		let bytes = (self.conversion)(value);
 		let byte_size = bytes.len();
 		self.builder.append_value(bytes);
 		Ok(byte_size + 1)
@@ -170,7 +170,7 @@ impl<const N: usize, TPg, FConversion> FixedLenBinaryColumnAppender<N, TPg, FCon
 	}
 }
 
-impl<const N: usize, TPg: Clone, FConversion> ColumnAppenderBase for FixedLenBinaryColumnAppender<N, TPg, FConversion>
+impl<const N: usize, TPg, FConversion> ColumnAppenderBase for FixedLenBinaryColumnAppender<N, TPg, FConversion>
 	where FConversion: Fn(&TPg) -> Option<[u8; N]>,
 {
 	fn write_null(&mut self) -> Result<usize, String> {
@@ -184,11 +184,11 @@ impl<const N: usize, TPg: Clone, FConversion> ColumnAppenderBase for FixedLenBin
 	}
 }
 
-impl<const N: usize, TPg: Clone, FConversion> ColumnAppender<TPg> for FixedLenBinaryColumnAppender<N, TPg, FConversion>
+impl<const N: usize, TPg, FConversion> ColumnAppender<TPg> for FixedLenBinaryColumnAppender<N, TPg, FConversion>
 	where FConversion: Fn(&TPg) -> Option<[u8; N]>,
 {
-	fn copy_value(&mut self, value: Cow<TPg>) -> Result<usize, String> {
-		match (self.conversion)(value.as_ref()) {
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		match (self.conversion)(value) {
 			None => self.builder.append_null(),
 			Some(bytes) => self.builder.append_value(&bytes).unwrap()
 		}
@@ -196,10 +196,10 @@ impl<const N: usize, TPg: Clone, FConversion> ColumnAppender<TPg> for FixedLenBi
 	}
 }
 
-pub fn new_autoconv_byte_array_binary_appender<TPg>() -> PrimitiveColumnAppender<TPg, ByteArrayType, impl Fn(TPg) -> PqByteArray>
+pub fn new_autoconv_byte_array_binary_appender<TPg>() -> PrimitiveColumnAppender<TPg, ByteArrayType, impl Fn(&TPg) -> PqByteArray>
 	where
 		TPg: Clone,
 		PqByteArray: MyFrom<TPg>,
 {
-	PrimitiveColumnAppender::new(|value: TPg| MyFrom::my_from(value))
+	PrimitiveColumnAppender::new(|value: &TPg| MyFrom::my_from((*value).clone()))
 }
