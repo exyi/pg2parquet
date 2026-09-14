@@ -22,11 +22,11 @@ impl<T> DynamicMergedAppender<T> {
 impl<T> ColumnAppenderBase for DynamicMergedAppender<T> {
 	fn write_null(&mut self) -> Result<usize, String> {
 		self.present.append_null();
-		let mut total = 1;
+		let mut total = 0;
 		for x in &mut self.columns {
 		    total += x.write_null()?;
 		}
-		Ok(total)
+		Ok(total.max(1))
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
@@ -55,7 +55,7 @@ impl<T> ColumnAppender<T> for DynamicMergedAppender<T> {
 		for c in self.columns.iter_mut() {
 			total += c.copy_value(reader)?;
 		}
-		Ok(total)
+		Ok(total.max(1))
 	}
 }
 
@@ -81,10 +81,10 @@ pub struct StaticMergedAppenderImpl<T, TAppender: ColumnAppender<T>, Next: Stati
 }
 
 impl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> ColumnAppenderBase for StaticMergedAppenderImpl<T, TAppender, Next> {
-    fn write_null(&mut self) -> Result<usize, String> {
-        let x = self.next.write_null()?;
-        let y = self.appender.write_null()?;
-        Ok(x + y)
+	fn write_null(&mut self) -> Result<usize, String> {
+		let x = self.next.write_null()?;
+		let y = self.appender.write_null()?;
+		Ok((x + y).max(1))
     }
 
     fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
@@ -96,7 +96,7 @@ impl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> ColumnAppen
     fn copy_value(&mut self, reader: &T) -> Result<usize, String> {
 		let x = self.next.copy_value(reader)?;
         let y = self.appender.copy_value(reader)?;
-        Ok(x + y)
+		Ok((x + y).max(1))
     }
 }
 
@@ -147,8 +147,8 @@ impl ColumnAppenderBase for StaticMergedAppenderNil {
 }
 
 impl<T> ColumnAppender<T> for StaticMergedAppenderNil {
-    fn copy_value(&mut self, _reader: &T) -> Result<usize, String> {
+	fn copy_value(&mut self, _reader: &T) -> Result<usize, String> {
 	self.null_buffer.append_non_null();
-        Ok(0)
+		Ok(1)
     }
 }

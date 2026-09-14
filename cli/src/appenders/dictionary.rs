@@ -1,11 +1,12 @@
 use std::{marker::PhantomData, sync::Arc};
-use arrow::{array::{ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, UInt16Builder, UInt16DictionaryArray}, datatypes::UInt32Type};
+use arrow::{array::{ArrayBuilder, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, UInt16Builder, UInt16DictionaryArray}, datatypes::UInt32Type};
 use super::{ColumnAppender, ColumnAppenderBase};
 
 pub struct DictionaryColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
 	builder: BinaryDictionaryBuilder<UInt32Type>,
+	max_key: u32,
 	conversion: FConversion,
 	_pg: PhantomData<TPg>,
 }
@@ -17,6 +18,7 @@ impl<TPg, FConversion> DictionaryColumnAppender<TPg, FConversion>
 		Self {
 			builder: BinaryDictionaryBuilder::new(),
 			conversion,
+			max_key: 0,
 			_pg: PhantomData,
 		}
 	}
@@ -27,7 +29,7 @@ impl<TPg, FConversion> ColumnAppenderBase for DictionaryColumnAppender<TPg, FCon
 {
 	fn write_null(&mut self) -> Result<usize, String> {
 		self.builder.append_null();
-		Ok(1)
+		Ok(4)
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
@@ -42,8 +44,13 @@ impl<TPg, FConversion> ColumnAppender<TPg> for DictionaryColumnAppender<TPg, FCo
 	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
 		let bytes = (self.conversion)(value);
 		let byte_size = bytes.len();
-		self.builder.append_value(bytes);
-		Ok(byte_size + 1)
+		let ix = self.builder.append(bytes).unwrap();
+		if ix > self.max_key || self.builder.len() == 0 {
+			self.max_key = ix;
+			Ok(byte_size + 4 + 4)
+		} else {
+			Ok(4)
+		}
 	}
 }
 
@@ -78,7 +85,7 @@ impl<TPg, FConversion> ColumnAppenderBase for SmallEnumColumnAppender<TPg, FConv
 {
 	fn write_null(&mut self) -> Result<usize, String> {
 		self.builder.append_null();
-		Ok(1)
+		Ok(2)
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
@@ -94,6 +101,6 @@ impl<TPg, FConversion> ColumnAppender<TPg> for SmallEnumColumnAppender<TPg, FCon
 	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
 		let case = (self.conversion)(value);
 		self.builder.append_value(case);
-		Ok(2 + 1)
+		Ok(2)
 	}
 }

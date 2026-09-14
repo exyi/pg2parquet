@@ -69,9 +69,9 @@ fn byte_conversion_nulls_append_rows_and_reset() {
 		value.as_ref().map(|bytes| { buffer.extend_from_slice(bytes); bytes.len() })
 	});
 	for _ in 0..2 {
-		appender.copy_value(&Some(vec![1, 2])).unwrap();
-		appender.copy_value(&None).unwrap();
-		appender.write_null().unwrap();
+		assert_eq!(appender.copy_value(&Some(vec![1, 2])).unwrap(), 6);
+		assert_eq!(appender.copy_value(&None).unwrap(), 4);
+		assert_eq!(appender.write_null().unwrap(), 4);
 		let array = appender.to_arrow_array().unwrap();
 		let bytes = array.as_any().downcast_ref::<BinaryArray>().unwrap();
 		assert_eq!(bytes.len(), 3);
@@ -79,6 +79,25 @@ fn byte_conversion_nulls_append_rows_and_reset() {
 		assert!(bytes.is_null(1));
 		assert!(bytes.is_null(2));
 	}
+}
+
+#[test]
+fn nulls_account_for_arrow_value_entries() {
+	let mut ints = new_autoconv_generic_appender::<i32, Int32Type>();
+	assert_eq!(ints.copy_value(&7).unwrap(), 4);
+	assert_eq!(ints.write_null().unwrap(), 4);
+
+	let mut binary = ByteArrayColumnAppender::new(|value: &Vec<u8>| value.as_slice());
+	assert_eq!(binary.copy_value(&vec![1, 2]).unwrap(), 6);
+	assert_eq!(binary.write_null().unwrap(), 4);
+
+	let mut lists = ArrayColumnAppender::new(
+		new_autoconv_generic_appender::<i32, Int32Type>(),
+		true,
+		true,
+	);
+	assert_eq!(lists.copy_value(&Vec::<Option<i32>>::new()).unwrap(), 4);
+	assert_eq!(lists.write_null().unwrap(), 4);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use arrow::array::ArrayRef;
 
-/// Appends return an approximate buffered byte count, including validity overhead.
+/// Appends return an approximate buffered byte count, excluding validity bitmap bits.
 /// Nulls may also be placeholders beneath a null parent struct.
 pub trait ColumnAppenderBase {
 	fn write_null(&mut self) -> Result<usize, String>;

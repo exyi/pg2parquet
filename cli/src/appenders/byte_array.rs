@@ -32,7 +32,7 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 			debug_assert_eq!(len, self.scratch.len());
 			self.builder.append_value(&self.scratch);
 
-			len + 1
+			len + 4
 		} else {
 			self.append_null()
 		}
@@ -40,7 +40,7 @@ impl<TPg, FCopyTo: Fn(&TPg, &mut Vec<u8>) -> Option<usize>> ByteArrayColumnAppen
 
 	fn append_null(&mut self) -> usize {
 		self.builder.append_null();
-		1
+		4
 	}
 
 }

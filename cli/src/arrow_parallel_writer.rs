@@ -28,6 +28,7 @@ struct RowGroup {
 	senders: Vec<ColSender>,
 	handles: Vec<JoinHandle<Result<ArrowColumnChunk, String>>>,
 	rows: usize,
+	bytes: usize,
 }
 
 /// Spawn per-column parallel serialization tasks for a row group and return their handles and senders.
@@ -55,7 +56,7 @@ fn spawn_column_parallel_row_group_writer(
 		}));
 	}
 
-	Ok(RowGroup { handles, senders, rows: 0 })
+	Ok(RowGroup { handles, senders, rows: 0, bytes: 0 })
 }
 
 /// Send arrays from a RecordBatch to their corresponding column writer channels.
@@ -131,10 +132,21 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 	}
 
 	/// Write a RecordBatch into the current row group, spawning column-level parallelism.
-	pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), String> {
+	pub fn write_batch(&mut self, batch: &RecordBatch, batch_bytes: usize) -> Result<(), String> {
 		assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
 		self.ensure_row_group()?;
+		let new_row_group = self.row_group.as_ref().is_some_and(|row_group| {
+			row_group.rows > 0 && (
+				row_group.rows + batch.num_rows() > self.settings.row_group_row_limit ||
+				row_group.bytes + batch_bytes > self.settings.row_group_byte_limit
+			)
+		});
+		if new_row_group {
+			self.flush_row_group()?;
+			self.ensure_row_group()?;
+		}
+
 		let row_group = self.row_group.as_mut().unwrap();
 		send_arrays_to_col_writers(
 			&row_group.senders,
@@ -143,12 +155,10 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 		)?;
 
 		row_group.rows += batch.num_rows();
+		row_group.bytes += batch_bytes;
 		self.stats.rows += batch.num_rows();
+		self.stats.bytes += batch_bytes as u64;
 
-		// flush if row group row limit reached
-		if row_group.rows >= self.settings.row_group_row_limit {
-			self.flush_row_group()?;
-		}
 		Ok(())
 	}
 
@@ -189,5 +199,47 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 			.close()
 			.map_err(|e| format!("Closing file failed: {}", e))?;
 		Ok(self.stats)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use arrow::array::{ArrayRef, Int32Array};
+	use arrow::datatypes::{DataType, Field};
+	use parquet::file::properties::WriterProperties;
+	use parquet::schema::parser::parse_message_type;
+	use std::io::Cursor;
+
+	#[test]
+	fn byte_limit_starts_a_new_row_group_before_it_is_exceeded() {
+		let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new("value", DataType::Int32, false)]));
+		let parquet_schema = Arc::new(parse_message_type("message schema { REQUIRED INT32 value; }").unwrap());
+		let props = Arc::new(WriterProperties::builder().build());
+		let file_writer = SerializedFileWriter::new(
+			Cursor::new(Vec::new()),
+			parquet_schema.clone(),
+			props.clone(),
+		).unwrap();
+		let mut writer = ArrowParallelWriter::new(
+			file_writer,
+			arrow_schema.clone(),
+			parquet_schema,
+			props,
+			WriterSettings::new(15, usize::MAX),
+		);
+
+		for values in [[1, 2], [3, 4]] {
+			let batch = RecordBatch::try_new(
+				arrow_schema.clone(),
+				vec![Arc::new(Int32Array::from(values.to_vec())) as ArrayRef],
+			).unwrap();
+			writer.write_batch(&batch, 10).unwrap();
+		}
+
+		let stats = writer.close().unwrap();
+		assert_eq!(stats.rows, 4);
+		assert_eq!(stats.bytes, 20);
+		assert_eq!(stats.groups, 2);
 	}
 }

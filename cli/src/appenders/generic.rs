@@ -8,25 +8,34 @@ pub trait PrimitiveParquetType: DataType
 	where Self::T: Clone + RealMemorySize
 {
 	type Builder: ArrayBuilder + Extend<Option<Self::T>> + Default;
+	const NULL_VALUE_SIZE: usize;
+	const VALUE_OVERHEAD: usize = 0;
 }
 
 impl PrimitiveParquetType for parquet::data_type::BoolType {
 	type Builder = BooleanBuilder;
+	const NULL_VALUE_SIZE: usize = 1;
 }
 impl PrimitiveParquetType for parquet::data_type::Int32Type {
 	type Builder = Int32Builder;
+	const NULL_VALUE_SIZE: usize = 4;
 }
 impl PrimitiveParquetType for parquet::data_type::Int64Type {
 	type Builder = Int64Builder;
+	const NULL_VALUE_SIZE: usize = 8;
 }
 impl PrimitiveParquetType for parquet::data_type::FloatType {
 	type Builder = Float32Builder;
+	const NULL_VALUE_SIZE: usize = 4;
 }
 impl PrimitiveParquetType for parquet::data_type::DoubleType {
 	type Builder = Float64Builder;
+	const NULL_VALUE_SIZE: usize = 8;
 }
 impl PrimitiveParquetType for parquet::data_type::ByteArrayType {
 	type Builder = BinaryBuilder;
+	const NULL_VALUE_SIZE: usize = 4;
+	const VALUE_OVERHEAD: usize = 4;
 }
 
 pub struct PrimitiveColumnAppender<TPg, TPq, FConversion>
@@ -80,7 +89,7 @@ impl<TPg, TPq, FConversion> ColumnAppenderBase for PrimitiveColumnAppender<TPg, 
 {
 	fn write_null(&mut self) -> Result<usize, String> {
 		self.builder.extend([None]);
-		Ok(1)
+		Ok(TPq::NULL_VALUE_SIZE)
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
@@ -99,7 +108,7 @@ impl<TPg, TPq, FConversion> ColumnAppender<TPg> for PrimitiveColumnAppender<TPg,
 		let pq_value = self.convert(value);
 		let byte_size = pq_value.real_memory_size();
 		self.builder.extend([Some(pq_value)]);
-		Ok(byte_size + 1)
+		Ok(byte_size + TPq::VALUE_OVERHEAD)
 	}
 }
 
@@ -130,7 +139,7 @@ impl<TPg, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FConv
 {
 	fn write_null(&mut self) -> Result<usize, String> {
 		self.builder.append_null();
-		Ok(1)
+		Ok(4)
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
@@ -146,7 +155,7 @@ impl<TPg, FConversion> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FCon
 		let bytes = (self.conversion)(value);
 		let byte_size = bytes.len();
 		self.builder.append_value(bytes);
-		Ok(byte_size + 1)
+		Ok(byte_size + 4)
 	}
 }
 
@@ -175,7 +184,7 @@ impl<const N: usize, TPg, FConversion> ColumnAppenderBase for FixedLenBinaryColu
 {
 	fn write_null(&mut self) -> Result<usize, String> {
 		self.builder.append_null();
-		Ok(1)
+		Ok(N)
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
@@ -192,7 +201,7 @@ impl<const N: usize, TPg, FConversion> ColumnAppender<TPg> for FixedLenBinaryCol
 			None => self.builder.append_null(),
 			Some(bytes) => self.builder.append_value(&bytes).unwrap()
 		}
-		Ok(N + 1)
+		Ok(N)
 	}
 }
 

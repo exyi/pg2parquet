@@ -93,6 +93,6 @@ impl<TPg, TInner, TArray, TItem> ColumnAppender<TArray> for ArrayColumnAppender<
 
 		self.offsets_builder.push_length(element_count);
 		self.valid_builder.append_non_null();
-		Ok(bytes_written)
+		Ok(bytes_written + 4)
 	}
 }

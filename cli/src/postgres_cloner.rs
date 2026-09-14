@@ -294,13 +294,14 @@ fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<Client, String> {
 }
 
 pub fn execute_copy(
-	pg_args: &PostgresConnArgs, 
-	query: &str, 
-	output_file: &PathBuf, 
-	output_props: WriterPropertiesPtr, 
-	quiet: bool, 
+	pg_args: &PostgresConnArgs,
+	query: &str,
+	output_file: &PathBuf,
+	output_props: WriterPropertiesPtr,
+	quiet: bool,
 	schema_settings: &SchemaSettings,
 	_threads: usize,
+	row_group_byte_limit: usize,
 ) -> Result<WriterStats, String> {
 
 	let mut client = pg_connect(pg_args, quiet)?;
@@ -313,7 +314,7 @@ pub fn execute_copy(
 	let schema = Arc::new(schema);
 	let output_props = crate::parquet_writer::disable_binary_decimal_statistics(schema.clone(), output_props);
 
-	let settings = WriterSettings { row_group_byte_limit: 500 * 1024 * 1024, row_group_row_limit: output_props.max_row_group_size() };
+	let settings = WriterSettings { row_group_byte_limit, row_group_row_limit: output_props.max_row_group_size() };
 
 	let output_file_f = std::fs::File::create(output_file).unwrap();
 	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props.clone())
@@ -416,27 +417,31 @@ pub fn execute_copy(
 				pq_writer, arrow_schema.clone(), parquet_schema, output_props.clone(), settings.clone()
 			);
 
+			let batch_row_limit = settings.row_group_row_limit.min(64 * 1024);
+			let batch_byte_limit = settings.row_group_byte_limit.min(16 * 1024 * 1024);
+
 			let mut batch_rows = 0usize;
+			let mut batch_bytes = 0usize;
 			let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
 				.map_err(|err| format!("Failed to execute the SQL query: {}", err))?;
 			for (row_i, r) in rows.iterator().enumerate() {
 				let row = Arc::new(r.map_err(|err| format!("Error loading row from postgres: {err}"))?);
 				for (col_i, app) in col_appenders.iter_mut().enumerate() {
-					app.copy_value(&row)
+					let bytes = app.copy_value(&row)
 						.map_err(|e| format!("Failed to row {row_i} column {col_i}: {e}"))?;
+					batch_bytes += bytes;
 				}
-				batch_rows += 1; 
-				// TODO: configurable batch size
-				// TODO: handle row_group_byte_limit
-				if batch_rows >= 4096 {
+				batch_rows += 1;
+				if batch_rows >= batch_row_limit || batch_bytes >= batch_byte_limit {
 					let mut arrays: Vec<ArrayRef> = Vec::with_capacity(col_appenders.len());
 					for (col_i, a) in col_appenders.iter_mut().enumerate() {
 						let arr = a.to_arrow_array().map_err(|e| format!("Failed Arrow conversion of column {col_i}: {e}"))?;
 						arrays.push(arr);
 					}
 					let rb = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| format!("Failed to create RecordBatch at row {row_i}: {e}"))?;
-					apw.write_batch(&rb)?;
+					apw.write_batch(&rb, batch_bytes)?;
 					batch_rows = 0;
+					batch_bytes = 0;
 				}
 			}
 			// Flush any remaining via Arrow if still using it
@@ -450,7 +455,7 @@ pub fn execute_copy(
 				}
 				let rb = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| e.to_string())?;
 				if !quiet { eprintln!("[arrow-appender] final batch rows: {}", rb.num_rows()); }
-				apw.write_batch(&rb)?;
+				apw.write_batch(&rb, batch_bytes)?;
 			}
 
 			let stats = apw.close()?;

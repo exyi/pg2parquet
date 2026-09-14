@@ -26,7 +26,7 @@ pub(crate) fn disable_binary_decimal_statistics(
 #[derive(Debug, Clone, Default)]
 pub struct WriterStats {
 	pub rows: usize,
-	pub bytes: usize,
+	pub bytes: u64,
 	pub bytes_out: usize,
 	pub groups: usize,
 }
