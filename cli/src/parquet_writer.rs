@@ -13,7 +13,7 @@ pub(crate) fn disable_binary_decimal_statistics(
 	let mut builder = props.as_ref().clone().into_builder();
 	for column in descriptor.columns() {
 		if column.physical_type() == Type::BYTE_ARRAY
-			&& (matches!(column.logical_type(), Some(LogicalType::Decimal { .. }))
+			&& (matches!(column.logical_type_ref(), Some(LogicalType::Decimal(_)))
 				|| column.converted_type() == ConvertedType::DECIMAL)
 		{
 			builder = builder.set_column_statistics_enabled(column.path().clone(), EnabledStatistics::None);

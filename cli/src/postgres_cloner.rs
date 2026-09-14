@@ -13,7 +13,6 @@ use parquet::basic::{self, ConvertedType, IntType, LogicalType, Repetition};
 use parquet::data_type::{DataType, BoolType, Int32Type, Int64Type, FloatType, DoubleType, ByteArray, ByteArrayType, FixedLenByteArrayType, FixedLenByteArray};
 use parquet::file::properties::WriterPropertiesPtr;
 use parquet::file::writer::SerializedFileWriter;
-use parquet::format::TimestampType;
 use pg_bigdecimal::PgNumeric;
 use postgres::error::SqlState;
 use postgres::types::{Kind, Type as PgType, FromSql};
@@ -314,7 +313,10 @@ pub fn execute_copy(
 	let schema = Arc::new(schema);
 	let output_props = crate::parquet_writer::disable_binary_decimal_statistics(schema.clone(), output_props);
 
-	let settings = WriterSettings { row_group_byte_limit, row_group_row_limit: output_props.max_row_group_size() };
+	let settings = WriterSettings {
+		row_group_byte_limit,
+		row_group_row_limit: output_props.max_row_group_row_count().unwrap_or(usize::MAX),
+	};
 
 	let output_file_f = std::fs::File::create(output_file).unwrap();
 	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props.clone())
@@ -347,7 +349,7 @@ pub fn execute_copy(
 					// Handle LIST and STRUCT
 					// TODO: burn this
 					let nullable = basic_info.repetition() != Repetition::REQUIRED;
-					match basic_info.logical_type() {
+					match basic_info.logical_type_ref() {
 						Some(LogicalType::List) => {
 							// Expect single repeated child group with one field "element"
 							if fields.len() != 1 { panic!(); }
@@ -408,13 +410,12 @@ pub fn execute_copy(
 
 		if !fields.is_empty() {
 			let arrow_schema = Arc::new(ArrowSchema::new(fields));
-			let parquet_schema = schema.clone();
 			// Preflight: ensure the number of Arrow leaf columns matches Parquet leaves and appenders support Arrow export.
 			// We avoid consuming appender buffers during preflight; this only checks schema mapping.
 			// Use buffered Arrow export per-batch; do not require prior preparation
 			// Take ownership of the file writer for Arrow path
 			let mut apw = crate::arrow_parallel_writer::ArrowParallelWriter::new(
-				pq_writer, arrow_schema.clone(), parquet_schema, output_props.clone(), settings.clone()
+				pq_writer, arrow_schema.clone(), settings.clone()
 			);
 
 			let batch_row_limit = settings.row_group_row_limit.min(64 * 1024);
@@ -473,30 +474,30 @@ pub fn execute_copy(
 fn flush_rowgroup_with_appender<W: std::io::Write + Send>(_file_writer: &mut SerializedFileWriter<W>, _row_appender: &mut DynColumnAppender<Arc<Row>>) -> Result<(), String> { unreachable!() }
 
 fn format_schema(schema: &ParquetType, indent: u32) -> String {
-	fn format_time_unit(u: &parquet::format::TimeUnit) -> &str {
+	fn format_time_unit(u: &basic::TimeUnit) -> &str {
 		match u {
-			basic::TimeUnit::MILLIS(_) => "ms",
-			basic::TimeUnit::MICROS(_) => "µs",
-			basic::TimeUnit::NANOS(_) => "ns",
+			basic::TimeUnit::MILLIS => "ms",
+			basic::TimeUnit::MICROS => "µs",
+			basic::TimeUnit::NANOS => "ns",
 		}
 	}
 	fn format_logical_type(t: &LogicalType) -> String {
 		match t {
-			LogicalType::Decimal { scale, precision } => format!("Decimal({}, {})", precision, scale),
-			LogicalType::Time { is_adjusted_to_u_t_c, unit } =>
-				format!("Time({}, utc={:?})", format_time_unit(unit), is_adjusted_to_u_t_c),
-			LogicalType::Timestamp { is_adjusted_to_u_t_c, unit } =>
-				format!("Timestamp({}, utc={:?})", format_time_unit(unit), is_adjusted_to_u_t_c),
-			LogicalType::Integer { bit_width, is_signed } => {
-				let sign = if *is_signed { "" } else { "U" };
-				format!("{}Int{}", sign, bit_width)
+			LogicalType::Decimal(decimal) => format!("Decimal({}, {})", decimal.precision, decimal.scale),
+			LogicalType::Time(time) =>
+				format!("Time({}, utc={:?})", format_time_unit(&time.unit), time.is_adjusted_to_u_t_c),
+			LogicalType::Timestamp(timestamp) =>
+				format!("Timestamp({}, utc={:?})", format_time_unit(&timestamp.unit), timestamp.is_adjusted_to_u_t_c),
+			LogicalType::Integer(integer) => {
+				let sign = if integer.is_signed { "" } else { "U" };
+				format!("{}Int{}", sign, integer.bit_width)
 			}
 			_ => format!("{:?}", t)
 		}
 	}
 	let basic_info = schema.get_basic_info();
 	let logical_type =
-		basic_info.logical_type().map(|lt| format_logical_type(&lt))
+		basic_info.logical_type_ref().map(format_logical_type)
 			.or_else(||
 				match basic_info.converted_type() {
 					ConvertedType::NONE => None,
@@ -511,10 +512,10 @@ fn format_schema(schema: &ParquetType, indent: u32) -> String {
 				None => (physical_type.to_string(), "".to_owned())
 			};
 
-			if *precision > 0 && !matches!(basic_info.logical_type(), Some(LogicalType::Decimal { .. })) {
+			if *precision > 0 && !matches!(basic_info.logical_type_ref(), Some(LogicalType::Decimal(_))) {
 				additional_info += &format!(" precision: {}", precision);
 			}
-			if *scale > 0 && !matches!(basic_info.logical_type(), Some(LogicalType::Decimal { .. })) {
+			if *scale > 0 && !matches!(basic_info.logical_type_ref(), Some(LogicalType::Decimal(_))) {
 				additional_info += &format!(" scale: {}", scale);
 			}
 			if !additional_info.trim().is_empty() {
@@ -649,8 +650,8 @@ fn map_schema_column<TRow: PgAbstractRow + 'static>(
 					}
 				);
 
-			let dim_schema = make_list_schema("dims", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: false })).build().unwrap());
-			let lb_schema = make_list_schema("lower_bound", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: true })).build().unwrap());
+			let dim_schema = make_list_schema("dims", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::integer(32, false))).build().unwrap());
+			let lb_schema = make_list_schema("lower_bound", Repetition::REQUIRED, ParquetType::primitive_type_builder("element", basic::Type::INT32).with_repetition(Repetition::REQUIRED).with_logical_type(Some(LogicalType::integer(32, true))).build().unwrap());
 
 			match settings.array_handling {
 				SchemaSettingsArrayHandling::Plain => {
@@ -769,17 +770,17 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 
 	Ok(match t.name() {
 		"bool" => resolve_primitive::<bool, BoolType, _>(name, c, None, None),
-		"int2" => resolve_primitive::<i16, Int32Type, _>(name, c, Some(LogicalType::Integer { bit_width: 16, is_signed: true }), None),
+		"int2" => resolve_primitive::<i16, Int32Type, _>(name, c, Some(LogicalType::integer(16, true)), None),
 		"int4" => resolve_primitive::<i32, Int32Type, _>(name, c, None, None),
-		"oid" => resolve_primitive::<u32, Int32Type, _>(name, c, Some(LogicalType::Integer { bit_width: 32, is_signed: false }), None),
+		"oid" => resolve_primitive::<u32, Int32Type, _>(name, c, Some(LogicalType::integer(32, false)), None),
 		"int8" => resolve_primitive::<i64, Int64Type, _>(name, c, None, None),
 		"float4" => resolve_primitive::<f32, FloatType, _>(name, c, None, None),
 		"float8" => resolve_primitive::<f64, DoubleType, _>(name, c, None, None),
 		"numeric" => {
 			resolve_numeric(s, name, c)?
 		},
-		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, Some(LogicalType::Decimal { scale: 2, precision: 18 }), None),
-		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, Some(LogicalType::Integer { bit_width: 8, is_signed: false }), None),
+		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, Some(LogicalType::decimal(2, 18)), None),
+		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, Some(LogicalType::integer(8, false)), None),
 		"bytea" => resolve_binary::<Vec<u8>, _>(name, c, None, None),
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
 			resolve_binary::<String, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8)),
@@ -791,13 +792,13 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 				SchemaSettingsJsonHandling::TextMarkedAsJson => LogicalType::Json
 			}), None),
 		"timestamptz" =>
-			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: true, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
+			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, Some(LogicalType::timestamp(true, basic::TimeUnit::MICROS)), None),
 		"timestamp" =>
-			resolve_primitive::<chrono::NaiveDateTime, Int64Type, _>(name, c, Some(LogicalType::Timestamp { is_adjusted_to_u_t_c: false, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
+			resolve_primitive::<chrono::NaiveDateTime, Int64Type, _>(name, c, Some(LogicalType::timestamp(false, basic::TimeUnit::MICROS)), None),
 		"date" =>
 			resolve_primitive::<chrono::NaiveDate, Int32Type, _>(name, c, Some(LogicalType::Date), None),
 		"time" =>
-			resolve_primitive::<chrono::NaiveTime, Int64Type, _>(name, c, Some(LogicalType::Time { is_adjusted_to_u_t_c: false, unit: parquet::format::TimeUnit::MICROS(parquet::format::MicroSeconds {  }) }), None),
+			resolve_primitive::<chrono::NaiveTime, Int64Type, _>(name, c, Some(LogicalType::time(false, basic::TimeUnit::MICROS)), None),
 
 		"uuid" =>
 			resolve_fixlen_binary::<16, uuid::Uuid, _, _>(name, c, Some(LogicalType::Uuid), None, |v| Some(v.into_bytes())),
@@ -865,7 +866,7 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 					Arc::new(ParquetType::group_type_builder("key_value").with_repetition(Repetition::REPEATED).with_fields(vec![
 						Arc::new(ParquetType::primitive_type_builder("key", basic::Type::INT32)
 							.with_repetition(Repetition::REQUIRED)
-							.with_logical_type(Some(LogicalType::Integer { bit_width: 32, is_signed: false }))
+							.with_logical_type(Some(LogicalType::integer(32, false)))
 							.build().unwrap()),
 						Arc::new(ParquetType::primitive_type_builder("value", basic::Type::FLOAT)
 							.with_repetition(Repetition::REQUIRED)
@@ -900,7 +901,7 @@ fn resolve_numeric<TRow: PgAbstractRow + 'static>(s: &SchemaSettings, name: &str
 				basic::Type::BYTE_ARRAY
 			};
 		let schema = ParquetType::primitive_type_builder(name, pq_type)
-				.with_logical_type(Some(LogicalType::Decimal { scale, precision: precision as i32 }))
+				.with_logical_type(Some(LogicalType::decimal(scale, precision as i32)))
 				.with_precision(precision as i32)
 				.with_scale(scale)
 				.build().unwrap();
@@ -1062,8 +1063,8 @@ fn build_primitive_pq_type(name: &'_ str, data_type: parquet::basic::Type, lengt
 	};
 
 	match &logical_type {
-		Some(LogicalType::Decimal { scale, precision }) => {
-			t = t.with_precision(*precision).with_scale(*scale);
+		Some(LogicalType::Decimal(decimal)) => {
+			t = t.with_precision(decimal.precision).with_scale(decimal.scale);
 		},
 		_ => {}
 	};

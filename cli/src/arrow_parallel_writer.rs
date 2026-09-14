@@ -7,9 +7,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use parquet::file::properties::WriterPropertiesPtr;
 use parquet::file::writer::SerializedFileWriter;
-use parquet::schema::types::{SchemaDescriptor, TypePtr};
 
 use crossbeam_channel::{bounded, Sender};
 use std::thread::JoinHandle;
@@ -20,7 +18,7 @@ use arrow::datatypes::Schema as ArrowSchema;
 use arrow::record_batch::RecordBatch;
 
 use parquet::arrow::arrow_writer::{
-	compute_leaves, get_column_writers, ArrowColumnChunk, ArrowLeafColumn,
+	compute_leaves, ArrowColumnChunk, ArrowLeafColumn, ArrowRowGroupWriterFactory,
 };
 
 type ColSender = Sender<ArrowLeafColumn>;
@@ -32,14 +30,14 @@ struct RowGroup {
 }
 
 /// Spawn per-column parallel serialization tasks for a row group and return their handles and senders.
-fn spawn_column_parallel_row_group_writer(
+fn spawn_column_parallel_row_group_writer<W: Write + Send>(
+	file_writer: &SerializedFileWriter<W>,
 	arrow_schema: Arc<ArrowSchema>,
-	parquet_root: TypePtr,
-	writer_props: WriterPropertiesPtr,
 	channel_buffer: usize,
 ) -> Result<RowGroup, String> {
-	let schema_desc = SchemaDescriptor::new(parquet_root);
-	let col_writers = get_column_writers(&schema_desc, &writer_props, &arrow_schema)
+	let row_group_index = file_writer.flushed_row_groups().len();
+	let col_writers = ArrowRowGroupWriterFactory::new(file_writer, arrow_schema)
+		.create_column_writers(row_group_index)
 		.map_err(|e| format!("Failed to get column writers: {}", e))?;
 
 	let mut handles = Vec::with_capacity(col_writers.len());
@@ -89,8 +87,6 @@ fn send_arrays_to_col_writers(
 pub struct ArrowParallelWriter<W: Write + Send> {
 	file_writer: SerializedFileWriter<W>,
 	arrow_schema: Arc<ArrowSchema>,
-	parquet_schema: TypePtr,
-	writer_props: WriterPropertiesPtr,
 	settings: WriterSettings,
 
 	row_group: Option<RowGroup>,
@@ -103,15 +99,11 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 	pub fn new(
 		file_writer: SerializedFileWriter<W>,
 		arrow_schema: Arc<ArrowSchema>,
-		parquet_schema: TypePtr,
-		writer_props: WriterPropertiesPtr,
 		settings: WriterSettings,
 	) -> Self {
 		Self {
 			file_writer,
 			arrow_schema,
-			parquet_schema,
-			writer_props,
 			settings,
 			row_group: None,
 			stats: WriterStats::default(),
@@ -122,9 +114,8 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 	fn ensure_row_group(&mut self) -> Result<(), String> {
 		if self.row_group.is_none() {
 			self.row_group = Some(spawn_column_parallel_row_group_writer(
+				&self.file_writer,
 				self.arrow_schema.clone(),
-				self.parquet_schema.clone(),
-				self.writer_props.clone(),
 				8, // small bounded buffer per column
 			)?);
 		}
@@ -224,8 +215,6 @@ mod tests {
 		let mut writer = ArrowParallelWriter::new(
 			file_writer,
 			arrow_schema.clone(),
-			parquet_schema,
-			props,
 			WriterSettings::new(15, usize::MAX),
 		);
 

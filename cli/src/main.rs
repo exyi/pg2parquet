@@ -294,7 +294,7 @@ fn perform_export(args: ExportArgs) {
             .set_write_batch_size(batch_size)
             .set_created_by(format!("pg2parquet version {}, using {}", env!("CARGO_PKG_VERSION"), parquet::file::properties::DEFAULT_CREATED_BY));
     if let Some(row_group_row_limit) = args.row_group_row_limit {
-        props_builder = props_builder.set_max_row_group_size(row_group_row_limit);
+        props_builder = props_builder.set_max_row_group_row_count(Some(row_group_row_limit));
     }
     let props = Arc::new(props_builder.build());
 
