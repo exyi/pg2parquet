@@ -20,14 +20,14 @@ use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
 use postgres::fallible_iterator::FallibleIterator;
 use parquet::schema::types::{GroupTypeBuilder, PrimitiveTypeBuilder, Type as ParquetType, TypePtr};
 use half::f16;
-use arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField, DataType as ArrowDataType, TimeUnit};
-use arrow::array::{ArrayRef, FixedSizeBinaryArray};
+use arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField};
 use arrow::record_batch::RecordBatch;
 
 use crate::datatypes::array::{PgMultidimArray, PgMultidimArrayLowerBounds};
 use crate::datatypes::pgvector::{self, PgSparseVector};
 use crate::PostgresConnArgs;
-use crate::appenders::{ArrayColumnAppender, BasicPgRowColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, FixedLenBinaryColumnAppender, PreprocessAppender, PreprocessExt, PrimitiveColumnAppender, PrimitiveParquetType, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender, new_autoconv_generic_appender, new_static_merged_appender};
+use crate::appenders::{ArrayColumnAppender, BasicPgRowColumnAppender, ByteArrayColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, FixedLenBinaryColumnAppender, PreprocessAppender, PreprocessExt, PrimitiveColumnAppender, PrimitiveParquetType, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender, new_autoconv_generic_appender, new_static_merged_appender};
+use crate::appenders::dictionary::DictionaryColumnAppender;
 use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonb;
 use crate::datatypes::money::PgMoney;
@@ -306,172 +306,77 @@ pub fn execute_copy(
 	let mut client = pg_connect(pg_args, quiet)?;
 	let statement = client.prepare(query).map_err(|db_err| { format!("Prepare statement failed: {db_err} ({})", db_err.as_db_error().map_or("no message", |e| e.message())) })?;
 
-	let (_row_appender_unused, schema) = map_schema_root(statement.columns(), schema_settings)?;
+	if statement.columns().is_empty() {
+		return Err("The query must return at least one column".to_string());
+	}
+	let (mut col_appenders, schema) = map_schema_root(statement.columns(), schema_settings)?;
+	assert!(col_appenders.len() > 0);
 	if !quiet {
 		eprintln!("Schema: {}", format_schema(&schema, 0));
 	}
+
+	let fields = col_appenders.iter_mut().zip(schema.get_fields())
+		.map(|(appender, field)| {
+			let array = appender.to_arrow_array()
+				.map_err(|e| format!("Failed to get data type from column {}: {e}", field.name()))?;
+			let (name, nullable) = field_metadata(field);
+			Ok(ArrowField::new(name, array.data_type().clone(), nullable))
+		})
+		.collect::<Result<Vec<_>, String>>()?;
+	let arrow_schema = Arc::new(ArrowSchema::new(fields));
 	let schema = Arc::new(schema);
 	let output_props = crate::parquet_writer::disable_binary_decimal_statistics(schema.clone(), output_props);
-
 	let settings = WriterSettings {
 		row_group_byte_limit,
 		row_group_row_limit: output_props.max_row_group_row_count().unwrap_or(usize::MAX),
 	};
 
 	let output_file_f = std::fs::File::create(output_file).unwrap();
-	let pq_writer = SerializedFileWriter::new(output_file_f, schema.clone(), output_props.clone())
-		.map_err(|e| format!("Failed to create parquet writer: {}", e))?;
+	let pq_writer = SerializedFileWriter::new(output_file_f, schema, output_props)
+		.map_err(|e| format!("Failed to create parquet writer: {e}"))?;
+	let mut writer = crate::arrow_parallel_writer::ArrowParallelWriter::new(
+		pq_writer, arrow_schema.clone(), settings,
+	);
 
-	// Appender-driven Arrow path for supported mixed-type batches: try Arrow export per batch; fallback per-batch otherwise
-	{
-		use arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField, DataType as ArrowDataType};
-		use arrow::array::ArrayRef;
-		use arrow::record_batch::RecordBatch;
+	let mut flush_batch = |appenders: &mut [DynColumnAppender<Row>], bytes| {
+		let arrays = appenders.iter_mut().enumerate()
+			.map(|(i, appender)| appender.to_arrow_array()
+				.map_err(|e| format!("Failed Arrow conversion of column {}: {e}", arrow_schema.fields[i].name())))
+			.collect::<Result<Vec<_>, _>>()?;
+		let batch = RecordBatch::try_new(arrow_schema.clone(), arrays)
+			.map_err(|e| format!("Failed to create RecordBatch: {e}"))?;
+		writer.write_batch(&batch, bytes)
+	};
 
-		// Derive Arrow fields from parquet schema types (primitive, lists, structs)
-		fn arrow_field_for_parquet_leaf(p: &ParquetType, name: &str) -> ArrowField {
-			match p {
-				ParquetType::PrimitiveType { basic_info, physical_type, type_length, .. } => {
-					let dt = match physical_type {
-						basic::Type::BOOLEAN => ArrowDataType::Boolean,
-						basic::Type::INT32 => ArrowDataType::Int32,
-						basic::Type::INT64 => ArrowDataType::Int64,
-						basic::Type::INT96 => panic!(),
-						basic::Type::FLOAT => ArrowDataType::Float32,
-						basic::Type::DOUBLE => ArrowDataType::Float64,
-						basic::Type::BYTE_ARRAY => ArrowDataType::Binary,
-						basic::Type::FIXED_LEN_BYTE_ARRAY => ArrowDataType::FixedSizeBinary(*type_length)
-					};
-					let nullable = basic_info.repetition() != Repetition::REQUIRED;
-					ArrowField::new(name, dt, nullable)
-				},
-				ParquetType::GroupType { basic_info, fields } => {
-					// Handle LIST and STRUCT
-					// TODO: burn this
-					let nullable = basic_info.repetition() != Repetition::REQUIRED;
-					match basic_info.logical_type_ref() {
-						Some(LogicalType::List) => {
-							// Expect single repeated child group with one field "element"
-							if fields.len() != 1 { panic!(); }
-							let list_group = &fields[0];
-							match list_group.as_ref() {
-								ParquetType::GroupType { fields: elem_fields, .. } if elem_fields.len() == 1 => {
-									let ef = elem_fields[0].as_ref();
-									let inner = arrow_field_for_parquet_leaf(ef, "element");
-									ArrowField::new(name, ArrowDataType::List(Arc::new(inner)), nullable)
-								},
-								_ => panic!(),
-							}
-						}
-						Some(LogicalType::Map) => {
-							// Expect single repeated child group with one field "element"
-							if fields.len() != 1 { panic!() }
-							let list_group = &fields[0];
-							match list_group.as_ref() {
-								ParquetType::GroupType { fields: elem_fields, .. } if elem_fields.len() == 2 => {
-									let group = arrow_field_for_parquet_leaf(list_group.as_ref(), "key_value").with_nullable(false);
-									ArrowField::new(name, ArrowDataType::List(Arc::new(group)), nullable)
-								},
-								_ => panic!("Unexpected map shape {list_group:?}"),
-							}
-						}
-						_ => {
-							// Struct or other group: map each field recursively
-							let mut arrow_fields: Vec<ArrowField> = Vec::with_capacity(fields.len());
-							for f in fields.iter() {
-								// Preserve Parquet field name
-								let fref = f.as_ref();
-								let fname = match fref {
-									ParquetType::PrimitiveType { basic_info, .. } => basic_info.name().to_string(),
-									ParquetType::GroupType { basic_info, .. } => basic_info.name().to_string(),
-								};
-								let af = arrow_field_for_parquet_leaf(fref, &fname);
-								arrow_fields.push(af);
-							}
-							ArrowField::new(name, ArrowDataType::Struct(arrow::datatypes::Fields::from(arrow_fields)), nullable)
-						}
-					}
-				}
-			}
+	let batch_row_limit = settings.row_group_row_limit.min(64 * 1024);
+	let batch_byte_limit = settings.row_group_byte_limit.min(16 * 1024 * 1024);
+	let mut batch_rows = 0;
+	let mut batch_bytes = 0;
+	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
+		.map_err(|err| format!("Failed to execute the SQL query: {err}"))?;
+	for (row_i, row) in rows.iterator().enumerate() {
+		let row = row.map_err(|err| format!("Error loading row from postgres: {err}"))?;
+		for (col_i, appender) in col_appenders.iter_mut().enumerate() {
+			batch_bytes += appender.copy_value(&row)
+				.map_err(|e| format!("Failed to copy row {row_i} column {col_i}: {e}"))?;
 		}
-
-		// Build per-column appenders (reuse schema mapping) and Arrow fields; use Arrow path when every root column maps to a supported Arrow type
-		let mut col_appenders: Vec<DynColumnAppender<Arc<Row>>> = Vec::with_capacity(statement.columns().len());
-		let mut fields: Vec<ArrowField> = Vec::with_capacity(statement.columns().len());
-	for (i, c) in statement.columns().iter().enumerate() {
-			let col_info = ColumnInfo::root(i, c.name().to_string());
-			// Use full schema mapper so enums and other custom types are properly handled.
-			let (app, pt) = map_schema_column::<Arc<Row>>(c.type_(), &col_info, schema_settings)?;
-			// Use Arrow fast path if the parquet type is supported by Arrow conversion
-			let af = arrow_field_for_parquet_leaf(&pt, c.name());
-			fields.push(af);
-			col_appenders.push(app);
-		}
-
-		if !fields.is_empty() {
-			let arrow_schema = Arc::new(ArrowSchema::new(fields));
-			// Preflight: ensure the number of Arrow leaf columns matches Parquet leaves and appenders support Arrow export.
-			// We avoid consuming appender buffers during preflight; this only checks schema mapping.
-			// Use buffered Arrow export per-batch; do not require prior preparation
-			// Take ownership of the file writer for Arrow path
-			let mut apw = crate::arrow_parallel_writer::ArrowParallelWriter::new(
-				pq_writer, arrow_schema.clone(), settings.clone()
-			);
-
-			let batch_row_limit = settings.row_group_row_limit.min(64 * 1024);
-			let batch_byte_limit = settings.row_group_byte_limit.min(16 * 1024 * 1024);
-
-			let mut batch_rows = 0usize;
-			let mut batch_bytes = 0usize;
-			let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
-				.map_err(|err| format!("Failed to execute the SQL query: {}", err))?;
-			for (row_i, r) in rows.iterator().enumerate() {
-				let row = Arc::new(r.map_err(|err| format!("Error loading row from postgres: {err}"))?);
-				for (col_i, app) in col_appenders.iter_mut().enumerate() {
-					let bytes = app.copy_value(&row)
-						.map_err(|e| format!("Failed to row {row_i} column {col_i}: {e}"))?;
-					batch_bytes += bytes;
-				}
-				batch_rows += 1;
-				if batch_rows >= batch_row_limit || batch_bytes >= batch_byte_limit {
-					let mut arrays: Vec<ArrayRef> = Vec::with_capacity(col_appenders.len());
-					for (col_i, a) in col_appenders.iter_mut().enumerate() {
-						let arr = a.to_arrow_array().map_err(|e| format!("Failed Arrow conversion of column {col_i}: {e}"))?;
-						arrays.push(arr);
-					}
-					let rb = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| format!("Failed to create RecordBatch at row {row_i}: {e}"))?;
-					apw.write_batch(&rb, batch_bytes)?;
-					batch_rows = 0;
-					batch_bytes = 0;
-				}
-			}
-			// Flush any remaining via Arrow if still using it
-			if batch_rows > 0 {
-				let arrays: Vec<ArrayRef> = (0..col_appenders.len())
-					.map(|i| col_appenders[i].to_arrow_array())
-					.collect::<Result<Vec<_>,_>>()?;
-				if !quiet {
-					let lens: Vec<usize> = arrays.iter().map(|a| a.len()).collect();
-					eprintln!("[arrow-appender] final arrays lens: {:?}", lens);
-				}
-				let rb = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| e.to_string())?;
-				if !quiet { eprintln!("[arrow-appender] final batch rows: {}", rb.num_rows()); }
-				apw.write_batch(&rb, batch_bytes)?;
-			}
-
-			let stats = apw.close()?;
-			if !quiet { eprintln!("[arrow-appender] wrote {} rows, {} groups", stats.rows, stats.groups); }
-			return Ok(stats);
+		batch_rows += 1;
+		if batch_rows >= batch_row_limit || batch_bytes >= batch_byte_limit {
+			flush_batch(&mut col_appenders, batch_bytes)?;
+			batch_rows = 0;
+			batch_bytes = 0;
 		}
 	}
+	if batch_rows > 0 {
+		flush_batch(&mut col_appenders, batch_bytes)?;
+	}
 
-	// With mandatory Arrow export, we should never reach a sequential fallback.
-	// If we did, return a clear error.
-	Err("Sequential parquet fallback is disabled; Arrow export is mandatory for all columns".to_string())
+	let stats = writer.close()?;
+	if !quiet {
+		eprintln!("Wrote {} rows in {} row groups", stats.rows, stats.groups);
+	}
+	Ok(stats)
 }
-
-// Sequential row-group flush using existing appenders
-fn flush_rowgroup_with_appender<W: std::io::Write + Send>(_file_writer: &mut SerializedFileWriter<W>, _row_appender: &mut DynColumnAppender<Arc<Row>>) -> Result<(), String> { unreachable!() }
 
 fn format_schema(schema: &ParquetType, indent: u32) -> String {
 	fn format_time_unit(u: &basic::TimeUnit) -> &str {
@@ -555,8 +460,8 @@ fn count_columns(p: &ParquetType) -> usize {
 }
 
 
-fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedColumn<Arc<Row>>, String> {
-	let mut fields: Vec<ResolvedColumn<Arc<Row>>> = vec![];
+fn map_schema_root(row: &[Column], s: &SchemaSettings) -> Result<(Vec<DynColumnAppender<Row>>, ParquetType), String> {
+	let mut fields: Vec<ResolvedColumn<Row>> = vec![];
 	for (col_i, c) in row.iter().enumerate() {
 
 		let t = c.type_();
@@ -568,13 +473,12 @@ fn map_schema_root<'a>(row: &[Column], s: &SchemaSettings) -> Result<ResolvedCol
 
 	let (column_appenders, parquet_types): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
 
-	let merged_appender: DynColumnAppender<Arc<Row>> = Box::new(DynamicMergedAppender::new(column_appenders, parquet_types.iter().map(field_metadata).collect()));
 	let struct_type = ParquetType::group_type_builder("root")
 		.with_fields(parquet_types.into_iter().map(Arc::new).collect())
 		.build()
 		.unwrap();
 
-	Ok((merged_appender, struct_type))
+	Ok((column_appenders, struct_type))
 }
 
 fn map_schema_column<TRow: PgAbstractRow + 'static>(
@@ -585,11 +489,11 @@ fn map_schema_column<TRow: PgAbstractRow + 'static>(
 	match t.kind() {
 		Kind::Simple =>
 			map_simple_type(t, c, settings),
-		Kind::Enum(ref _enum_data) =>
+		Kind::Enum(ref enum_data) =>
 			match settings.enum_handling {
 				SchemaSettingsEnumHandling::Int => {
 					let mut mapping = HashMap::new();
-					for (i, v) in _enum_data.iter().enumerate() {
+					for (i, v) in enum_data.iter().enumerate() {
 						mapping.insert(v.to_string(), i as i32 + 1);
 					}
 					Ok(resolve_primitive_conv::<PgEnum, Int32Type, _, _>(c.col_name(), c, None, None, None, move |e|
@@ -597,9 +501,10 @@ fn map_schema_column<TRow: PgAbstractRow + 'static>(
 					))
 				},
 				SchemaSettingsEnumHandling::Text =>
-					Ok(resolve_binary::<PgEnum, _>(c.col_name(), c, Some(LogicalType::Enum), None)),
+					// TODO: small dictionary for small enums
+					Ok(resolve_dictionary::<PgEnum, _, _>(c.col_name(), c, Some(LogicalType::Enum), |v| v.name.as_bytes())),
 				SchemaSettingsEnumHandling::PlainText =>
-					Ok(resolve_binary::<PgEnum, _>(c.col_name(), c, Some(LogicalType::String), None)),
+					Ok(resolve_dictionary::<PgEnum, _, _>(c.col_name(), c, Some(LogicalType::String), |v| v.name.as_bytes())),
 			}
 		Kind::Array(ref element_type) => {
 			let list_column = c.nest("list", 0).as_array();
@@ -781,16 +686,14 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 		},
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, Some(LogicalType::decimal(2, 18)), None),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, Some(LogicalType::integer(8, false)), None),
-		"bytea" => resolve_binary::<Vec<u8>, _>(name, c, None, None),
+		"bytea" => resolve_borrowed_binary::<Vec<u8>, _, _>(name, c, None, None, Vec::as_slice),
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
-			resolve_binary::<String, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8)),
-			// (Box::new(crate::appenders::byte_array::create_pg_raw_appender(c.col_i)),
-			// 	ParquetType::primitive_type_builder(name, basic::Type::BYTE_ARRAY).with_logical_type(Some(LogicalType::String)).with_converted_type(ConvertedType::UTF8).build().unwrap()),
+			resolve_borrowed_binary::<String, _, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8), String::as_bytes),
 		"jsonb" | "json" =>
-			resolve_binary::<PgRawJsonb, _>(name, c, Some(match s.json_handling {
+			resolve_borrowed_binary::<PgRawJsonb, _, _>(name, c, Some(match s.json_handling {
 				SchemaSettingsJsonHandling::Text => LogicalType::String,
 				SchemaSettingsJsonHandling::TextMarkedAsJson => LogicalType::Json
-			}), None),
+			}), None, |v| v.data.as_bytes()),
 		"timestamptz" =>
 			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, Some(LogicalType::timestamp(true, basic::TimeUnit::MICROS)), None),
 		"timestamp" =>
@@ -957,10 +860,6 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, F
 	(Box::new(cp), t)
 }
 
-fn logical_type_requests_utf8(logical_type: Option<&LogicalType>) -> bool {
-	matches!(logical_type, Some(LogicalType::String) | Some(LogicalType::Enum) | Some(LogicalType::Json))
-}
-
 fn resolve_binary<T: for<'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
@@ -969,6 +868,41 @@ fn resolve_binary<T: for<'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow 
 ) -> ResolvedColumn<TRow>
 	where ByteArray: MyFrom<T> {
 	resolve_binary_conv::<T, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v.clone()))
+}
+
+fn resolve_borrowed_binary<T, FConversion, TRow>(
+	name: &str,
+	c: &ColumnInfo,
+	logical_type: Option<LogicalType>,
+	conv_type: Option<ConvertedType>,
+	convert: FConversion,
+) -> ResolvedColumn<TRow>
+where
+	T: for<'a> FromSql<'a> + 'static,
+	FConversion: for<'a> Fn(&'a T) -> &'a [u8] + 'static,
+	TRow: PgAbstractRow + 'static,
+{
+	let schema = build_primitive_pq_type(
+		name, basic::Type::BYTE_ARRAY, None, logical_type, conv_type,
+	).build().unwrap();
+	mk_resolved(c.col_i, ByteArrayColumnAppender::new(convert), schema)
+}
+
+fn resolve_dictionary<T, FConversion, TRow>(
+	name: &str,
+	c: &ColumnInfo,
+	logical_type: Option<LogicalType>,
+	convert: FConversion,
+) -> ResolvedColumn<TRow>
+where
+	T: for<'a> FromSql<'a> + 'static,
+	FConversion: for<'a> Fn(&'a T) -> &'a [u8] + 'static,
+	TRow: PgAbstractRow + 'static,
+{
+	let schema = build_primitive_pq_type(
+		name, basic::Type::BYTE_ARRAY, None, logical_type, None,
+	).build().unwrap();
+	mk_resolved(c.col_i, DictionaryColumnAppender::new(convert), schema)
 }
 
 fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn(&T) -> ByteArray + 'static, TRow: PgAbstractRow + 'static>(
@@ -1072,13 +1006,6 @@ fn build_primitive_pq_type(name: &'_ str, data_type: parquet::basic::Type, lengt
 	t.with_logical_type(logical_type)
 }
 
-fn create_primitive_appender_simple<T: for <'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + 'static>(
-	c: &ColumnInfo,
-) -> DynColumnAppender<TRow>
-	where TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize + MyFrom<T> {
-	Box::new(create_primitive_appender::<T, TDataType, _, TRow>(&c, |x| TDataType::T::my_from(x.clone())))
-}
-
 fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + 'static, TRow: PgAbstractRow>(
 	c: &ColumnInfo,
 	convert: FConversion
@@ -1099,53 +1026,6 @@ fn create_binary_appender<T: for <'a> FromSql<'a> + 'static, FConversion: Fn(&T)
 fn create_complex_appender<T: for <'a> FromSql<'a> + PgAbstractRow + 'static, TRow: PgAbstractRow>(c: &ColumnInfo, columns: Vec<DynColumnAppender<T>>, fields: Vec<(String, bool)>) -> impl ColumnAppender<TRow> {
 	let main_cp = DynamicMergedAppender::new(columns, fields);
 	wrap_pg_row_reader(c, main_cp)
-}
-
-fn create_array_appender<TRow: PgAbstractRow>(inner: DynColumnAppender<PgAny>, c: &ColumnInfo, warn_on_multidim: bool) -> impl ColumnAppender<TRow> {
-	let array_appender = ArrayColumnAppender::new(inner, true, true);
-	let warned = AtomicBool::new(false);
-	let col_clone = c.clone();
-	let multidim_appender = array_appender.preprocess_ref(move |x: &PgMultidimArray<Option<PgAny>>| {
-		if warn_on_multidim && x.dims.is_some() && !warned.load(Ordering::Relaxed) {
-			if !warned.fetch_or(true, Ordering::SeqCst) {
-				eprintln!("Warning: Column {} contains a {}-dimensional array which will be flattened in Parquet (i.e. {} -> {}). Use --array-handling=dimensions, include another column with the PostgreSQL array dimensions.",
-					col_clone.full_name(),
-					x.dims.as_ref().unwrap().len(),
-					x.dims.as_ref().unwrap().iter().map(|x| x.to_string()).collect::<Vec<_>>().join("x"),
-					x.data.len()
-				)
-			}
-		}
-		&x.data
-	});
-	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<PgAny>>>(c, multidim_appender)
-}
-
-fn create_array_dim_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
-	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>();
-	let dim_appender =
-		ArrayColumnAppender::new(int_appender, false, false)
-			.preprocess(|x: &PgMultidimArray<Option<T>>|
-				x.dims.as_ref()
-					.map(|x| x.iter().map(|c| Some(*c)).collect())
-					.unwrap_or_else(|| if x.data.len() == 0 { Vec::new() } else { vec![Some(x.data.len() as i32)] })
-			);
-	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<T>>>(c, dim_appender)
-}
-
-
-fn create_array_lower_bound_appender<T: Clone + for <'a> FromSql<'a> + 'static, TRow: PgAbstractRow>(c: &ColumnInfo) -> impl ColumnAppender<TRow> {
-	let int_appender = new_autoconv_generic_appender::<i32, Int32Type>();
-	let dim_appender =
-		ArrayColumnAppender::new(int_appender, false, false)
-			.preprocess(|x: &PgMultidimArray<Option<T>>|
-				match &x.lower_bounds {
-					_ if x.data.len() == 0 => Vec::new(),
-					PgMultidimArrayLowerBounds::Const(c) => vec![Some(*c); x.dims.as_ref().map(|x| x.len()).unwrap_or(1)],
-					PgMultidimArrayLowerBounds::PerDim(v) => v.iter().map(|x| Some(*x)).collect()
-				}
-			);
-	wrap_pg_row_reader::<TRow, PgMultidimArray<Option<T>>>(c, dim_appender)
 }
 
 fn wrap_pg_row_reader<TRow: PgAbstractRow, T: for <'a> FromSql<'a>>(c: &ColumnInfo, a: impl ColumnAppender<T>) -> impl ColumnAppender<TRow> {

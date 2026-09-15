@@ -13,7 +13,6 @@ mod array;
 mod pg_column;
 mod merged;
 mod helpers;
-pub mod byte_array;
 pub mod dictionary;
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ import unittest
 import duckdb
 import polars as pl
 import pandas as pd
+import pyarrow.parquet as pq
 
 wrappers.run_sql(
     """CREATE TYPE weekday AS ENUM ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday');""",
@@ -40,6 +41,9 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(polars_df["id"].to_list(), [1, 2, 3])
         self.assertEqual(polars_df["a"].to_list(), [b"monday", None, b"sunday"])
         self.assertEqual(polars_df["b"].to_list(), [[b"monday", b"tuesday"], None, [b"sunday", None, b"monday"]])
+        metadata = pq.ParquetFile(file).metadata.row_group(0)
+        self.assertIn("RLE_DICTIONARY", metadata.column(1).encodings)
+        self.assertIn("RLE_DICTIONARY", metadata.column(2).encodings)
 
     def test_enums_plaintext(self):
         file = wrappers.create_and_export(
@@ -65,6 +69,9 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(polars_df["id"].to_list(), [1, 2, 3])
         self.assertEqual(polars_df["a"].to_list(), ["monday", None, "sunday"])
         self.assertEqual(polars_df["b"].to_list(), [["monday", "tuesday"], None, ["sunday", None, "monday"]])
+        metadata = pq.ParquetFile(file).metadata.row_group(0)
+        self.assertIn("RLE_DICTIONARY", metadata.column(1).encodings)
+        self.assertIn("RLE_DICTIONARY", metadata.column(2).encodings)
 
     def test_enums_int(self):
         file = wrappers.create_and_export(
@@ -179,5 +186,4 @@ class TestBasic(unittest.TestCase):
         self.assertEqual(tuple(pd_rows[1]), (1, 2, None, None))
         self.assertEqual(tuple(pd_rows[2])[:-1], (2, 3, {'pdbid': None, 'model': None, 'chain': None}))
         self.assertEqual(list(tuple(pd_rows[2])[-1]), [None, {'pdbid': '1ehz', 'model': 1.0, 'chain': 'A'}, {'pdbid': None, 'model': None, 'chain': 'A'}])
-
 

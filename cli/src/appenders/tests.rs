@@ -1,7 +1,8 @@
 use arrow::array::{Array, BinaryArray, Int32Array, ListArray, StructArray};
-use arrow::datatypes::{DataType, Field};
+use arrow::datatypes::{DataType, Field, UInt32Type};
 use parquet::data_type::Int32Type;
 use super::*;
+use super::dictionary::DictionaryColumnAppender;
 
 #[test]
 fn nested_nulls_empty_lists_and_repeated_batches() {
@@ -65,12 +66,10 @@ fn list_of_structs_preserves_map_element_metadata() {
 
 #[test]
 fn byte_conversion_nulls_append_rows_and_reset() {
-	let mut appender = byte_array::ByteArrayColumnAppender::new(|value: &Option<Vec<u8>>, buffer: &mut Vec<u8>| {
-		value.as_ref().map(|bytes| { buffer.extend_from_slice(bytes); bytes.len() })
-	});
+	let mut appender = ByteArrayColumnAppender::new(Vec::as_slice);
 	for _ in 0..2 {
-		assert_eq!(appender.copy_value(&Some(vec![1, 2])).unwrap(), 6);
-		assert_eq!(appender.copy_value(&None).unwrap(), 4);
+		assert_eq!(appender.copy_value_opt(&Some(vec![1, 2])).unwrap(), 6);
+		assert_eq!(appender.copy_value_opt(&None).unwrap(), 4);
 		assert_eq!(appender.write_null().unwrap(), 4);
 		let array = appender.to_arrow_array().unwrap();
 		let bytes = array.as_any().downcast_ref::<BinaryArray>().unwrap();
@@ -122,4 +121,23 @@ fn appenders_accept_non_clone_inputs() {
 	let array = appender.to_arrow_array().unwrap();
 	let values = array.as_any().downcast_ref::<BinaryArray>().unwrap();
 	assert_eq!(values.value(0), &[1, 2, 3]);
+}
+
+#[test]
+fn dictionary_appender_deduplicates_values_and_resets() {
+	let mut appender = DictionaryColumnAppender::new(String::as_bytes);
+	for _ in 0..2 {
+		appender.write_null().unwrap();
+		assert_eq!(appender.copy_value(&"monday".to_string()).unwrap(), 14);
+		assert_eq!(appender.copy_value(&"monday".to_string()).unwrap(), 4);
+		assert_eq!(appender.copy_value(&"tuesday".to_string()).unwrap(), 15);
+
+		let array = appender.to_arrow_array().unwrap();
+		let dictionary = array.as_any()
+			.downcast_ref::<arrow::array::DictionaryArray<UInt32Type>>()
+			.unwrap();
+		assert_eq!(dictionary.len(), 4);
+		assert_eq!(dictionary.values().len(), 2);
+		assert!(dictionary.is_null(0));
+	}
 }

@@ -6,7 +6,7 @@ pub struct DictionaryColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
 	builder: BinaryDictionaryBuilder<UInt32Type>,
-	max_key: u32,
+	max_key: Option<u32>,
 	conversion: FConversion,
 	_pg: PhantomData<TPg>,
 }
@@ -18,7 +18,7 @@ impl<TPg, FConversion> DictionaryColumnAppender<TPg, FConversion>
 		Self {
 			builder: BinaryDictionaryBuilder::new(),
 			conversion,
-			max_key: 0,
+			max_key: None,
 			_pg: PhantomData,
 		}
 	}
@@ -34,6 +34,7 @@ impl<TPg, FConversion> ColumnAppenderBase for DictionaryColumnAppender<TPg, FCon
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
 		let array = Arc::new(self.builder.finish()) as ArrayRef;
+		self.max_key = None;
 		Ok(array)
 	}
 }
@@ -45,8 +46,8 @@ impl<TPg, FConversion> ColumnAppender<TPg> for DictionaryColumnAppender<TPg, FCo
 		let bytes = (self.conversion)(value);
 		let byte_size = bytes.len();
 		let ix = self.builder.append(bytes).unwrap();
-		if ix > self.max_key || self.builder.len() == 0 {
-			self.max_key = ix;
+		if self.max_key.is_none_or(|max_key| ix > max_key) {
+			self.max_key = Some(ix);
 			Ok(byte_size + 4 + 4)
 		} else {
 			Ok(4)

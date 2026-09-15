@@ -3,10 +3,10 @@
 Run pg2parquet benchmarks with hyperfine under different performance settings.
 
 Scenarios:
-- all cores (threads = CPU count), zstd compression
-- all cores (threads = CPU count), no compression
-- single core pinned (taskset -c 0, threads = 1), zstd compression
-- single core pinned (taskset -c 0, threads = 1), no compression
+- available cores, zstd compression
+- available cores, no compression
+- pinned to one available core, zstd compression
+- pinned to one available core, no compression
 
 Usage examples:
     python py-tests/bench_hyperfine.py --table public.my_table -o /tmp/bench
@@ -23,6 +23,7 @@ import argparse
 import datetime as dt
 import os
 import shutil
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -65,27 +66,6 @@ def which_or_die(cmd: str) -> str:
         return path
     print(f"Required command not found: {cmd}", file=sys.stderr)
     sys.exit(2)
-
-def encode_arg(a: str) -> str:
-    if '"' not in a:
-        return f'"{a}"'
-    if "'" not in a:
-        return f"'{a}'"
-    res = ""
-    quote = '"' if a.index("'") < a.index('"') else "'"
-    res += quote
-    for ch in a:
-        if ch == quote:
-            res += quote
-            quote = '"' if ch == "'" else "'"
-            res += quote
-        res += ch
-
-    res += quote
-    return res
-
-def encode_command(cmd: list[str]) -> str:
-    return " ".join(encode_arg(a) for a in cmd)
 
 def _sanitize_ident(name: str) -> str:
     safe = [ch if (ch.isalnum() or ch == "_") else "_" for ch in name]
@@ -347,7 +327,6 @@ def main() -> None:
 
     # Verify dependencies
     which_or_die("hyperfine")
-    cpu_count = os.cpu_count() or 1
 
     # Output dir
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -364,8 +343,7 @@ def main() -> None:
         args.table = target_table
 
     scenarios: list[tuple[str, list[str]]] = []  # (name, command string, outfile)
-    outfile = "/tmp/pg2parquet-test/out.parquet"
-    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    outfile = str(out_dir / "out.parquet")
 
     def build_cmd(compression: str, query: str | None, table: str | None) -> list[str]:
         base = [pg2parquet_binary, "export", *export_connection_args, "--compression", compression, "--quiet", "--output-file", outfile]
@@ -384,7 +362,7 @@ def main() -> None:
         hf_args: list[str] = [
             "hyperfine",
             "--warmup", str(args.warmup),
-            "--prepare", f"rm -f {outfile}",
+            "--prepare", shlex.join(["rm", "-f", outfile]),
             "--shell=none",
         ]
         if args.runs:
@@ -394,7 +372,7 @@ def main() -> None:
         out_json = out_dir / f"hyperfine{file_suffix}.json"
         hf_args += ["--export-json", str(out_json)]
         for name, cmd in cmds:
-            hf_args += ["-n", name, encode_command(cmd)]
+            hf_args += ["-n", name, shlex.join(cmd)]
         env = os.environ.copy()
         if pg2parquet_password:
             env["PGPASSWORD"] = pg2parquet_password
@@ -407,7 +385,8 @@ def main() -> None:
     
     runs = [(f"norm_{n}", c) for (n, c) in scenarios]
     if shutil.which("taskset"):
-        runs.extend([(f"thread1_{n}", ["taskset", "-c", "0", *c]) for (n, c) in scenarios])
+        cpu = min(os.sched_getaffinity(0))
+        runs.extend([(f"thread1_{n}", ["taskset", "-c", str(cpu), *c]) for (n, c) in scenarios])
     else:
         print("Warning: 'taskset' not found. Skipping pinned single-core scenarios.", file=sys.stderr)
 
