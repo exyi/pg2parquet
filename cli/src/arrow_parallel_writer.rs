@@ -4,8 +4,10 @@
 //! parallel column serialization for a single output parquet file. Each leaf
 //! column has one task; row groups are written sequentially.
 
+use std::fmt::Display;
 use std::io::Write;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parquet::file::writer::SerializedFileWriter;
 
@@ -93,6 +95,10 @@ pub struct ArrowParallelWriter<W: Write + Send> {
 
 	// stats
 	stats: WriterStats,
+	last_timestep_stats: WriterStats,
+	last_timestep_time: Instant,
+	start_time: Instant,
+	last_print_time: Instant,
 }
 
 impl<W: Write + Send> ArrowParallelWriter<W> {
@@ -101,12 +107,80 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 		arrow_schema: Arc<ArrowSchema>,
 		settings: WriterSettings,
 	) -> Self {
+		let start_time = Instant::now();
 		Self {
 			file_writer,
 			arrow_schema,
 			settings,
 			row_group: None,
 			stats: WriterStats::default(),
+			last_timestep_stats: WriterStats::default(),
+			last_timestep_time: start_time,
+			start_time,
+			last_print_time: start_time,
+		}
+	}
+
+	/// Print current throughput statistics, or a final summary.
+	pub fn print_stats(&mut self, summary: bool) {
+		fn format_number<T: Display>(n: T) -> String {
+			let mut result = format!("{}", n);
+			let mut last_index = result.find(['.', 'e']).unwrap_or(result.len());
+			while last_index > 3 {
+				last_index -= 3;
+				result.insert(last_index, '_');
+			}
+			result
+		}
+
+		let now = Instant::now();
+		if !summary && now.duration_since(self.last_print_time) < Duration::from_millis(300) {
+			return;
+		}
+
+		let total_elapsed = now.duration_since(self.start_time);
+		let block_elapsed = if summary {
+			total_elapsed
+		} else {
+			now.duration_since(self.last_timestep_time)
+		};
+		let block_stats = if summary {
+			&WriterStats::default()
+		} else {
+			&self.last_timestep_stats
+		};
+
+		eprint!(
+			"[{}:{:02}:{:02}.{:03}]: {} rows, {} MiB raw, {} MiB parquet, {} groups | {} rows/s, {} MiB/s                 ",
+			total_elapsed.as_secs() / 3600,
+			total_elapsed.as_secs() / 60 % 60,
+			total_elapsed.as_secs() % 60,
+			total_elapsed.as_millis() % 1000,
+			format_number(self.stats.rows),
+			format_number(self.stats.bytes / 1024 / 1024),
+			format_number(self.stats.bytes_out / 1024 / 1024),
+			format_number(self.stats.groups),
+			format_number(format!(
+				"{:.0}",
+				(self.stats.rows - block_stats.rows) as f64 / block_elapsed.as_secs_f64()
+			)),
+			format_number(format!(
+				"{:.2}",
+				(self.stats.bytes - block_stats.bytes) as f64
+					/ (block_elapsed.as_secs_f64() * 1024.0 * 1024.0)
+			)),
+		);
+		if summary {
+			eprintln!();
+		} else {
+			eprint!("\r");
+		}
+		std::io::stderr().flush().unwrap();
+		self.last_print_time = now;
+
+		if now.duration_since(self.last_timestep_time) > Duration::from_secs(60) {
+			self.last_timestep_stats = self.stats.clone();
+			self.last_timestep_time = now;
 		}
 	}
 

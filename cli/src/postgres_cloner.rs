@@ -397,6 +397,9 @@ async fn execute_copy_async(
 		if batch_rows >= batch_row_limit || batch_bytes >= batch_byte_limit {
 			let batch = flush_batch(&mut col_appenders)?;
 			writer.write_batch(&batch, batch_bytes).await?;
+			if !quiet {
+				writer.print_stats(false);
+			}
 			batch_rows = 0;
 			batch_bytes = 0;
 		}
@@ -406,14 +409,15 @@ async fn execute_copy_async(
 		writer.write_batch(&batch, batch_bytes).await?;
 	}
 
+	writer.flush_row_group().await?;
+	if !quiet {
+		writer.print_stats(true);
+	}
 	let stats = writer.close().await?;
 	drop((rows, statement, client));
 	connection.await
 		.map_err(|e| format!("PostgreSQL connection task failed: {e}"))?
 		.map_err(|e| format!("PostgreSQL connection failed: {e}"))?;
-	if !quiet {
-		eprintln!("Wrote {} rows in {} row groups", stats.rows, stats.groups);
-	}
 	Ok(stats)
 }
 
