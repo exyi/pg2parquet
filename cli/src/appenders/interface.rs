@@ -18,7 +18,7 @@ pub trait ColumnAppender<TPg>: ColumnAppenderBase {
 	}
 }
 
-pub type DynColumnAppender<T> = Box<dyn ColumnAppender<T>>;
+pub type DynColumnAppender<T> = Box<dyn ColumnAppender<T> + Send>;
 
 impl<T> ColumnAppenderBase for DynColumnAppender<T> {
     fn write_null(&mut self) -> Result<usize, String> {

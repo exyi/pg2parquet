@@ -46,7 +46,7 @@ class TestRowGroupSplitting(unittest.TestCase):
         self.assertEqual(process.returncode, 0, (stdout, stderr))
         self.assertEqual(pq.ParquetFile(outfile).metadata.num_rows, 64)
         self.assertGreater(max_threads, 0)
-        # Allow the main PostgreSQL reader plus one Parquet writer worker.
+        # Allow the waiting main thread plus one shared PostgreSQL/Parquet worker.
         self.assertLessEqual(max_threads, 2, "--threads=1 must bound writer concurrency")
 
     def test_nested_types_across_batches_and_empty_results(self) -> None:

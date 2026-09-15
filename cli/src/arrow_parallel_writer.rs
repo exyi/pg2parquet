@@ -2,15 +2,15 @@
 //!
 //! This module wires parquet::arrow::arrow_writer::ArrowColumnWriter to enable
 //! parallel column serialization for a single output parquet file. Each leaf
-//! column has one worker; row groups are written sequentially.
+//! column has one task; row groups are written sequentially.
 
 use std::io::Write;
 use std::sync::Arc;
 
 use parquet::file::writer::SerializedFileWriter;
 
-use crossbeam_channel::{bounded, Sender};
-use std::thread::JoinHandle;
+use tokio::sync::mpsc::{channel, Sender};
+use tokio::task::JoinHandle;
 
 use crate::parquet_writer::{WriterSettings, WriterStats};
 
@@ -43,10 +43,10 @@ fn spawn_column_parallel_row_group_writer<W: Write + Send>(
 	let mut handles = Vec::with_capacity(col_writers.len());
 	let mut senders = Vec::with_capacity(col_writers.len());
 	for mut writer in col_writers {
-		let (tx, rx) = bounded::<ArrowLeafColumn>(channel_buffer);
+		let (tx, mut rx) = channel::<ArrowLeafColumn>(channel_buffer);
 		senders.push(tx);
-		handles.push(std::thread::spawn(move || {
-			for col in rx {
+		handles.push(tokio::spawn(async move {
+			while let Some(col) = rx.recv().await {
 				writer.write(&col).map_err(|e| format!("Column write failed: {e}"))?;
 			}
 			// Closing may encode and compress buffered pages too.
@@ -58,7 +58,7 @@ fn spawn_column_parallel_row_group_writer<W: Write + Send>(
 }
 
 /// Send arrays from a RecordBatch to their corresponding column writer channels.
-fn send_arrays_to_col_writers(
+async fn send_arrays_to_col_writers(
 	col_array_channels: &[ColSender],
 	rb: &RecordBatch,
 	arrow_schema: &Arc<ArrowSchema>,
@@ -77,7 +77,7 @@ fn send_arrays_to_col_writers(
 		));
 	}
 	for (tx, leaf) in col_array_channels.iter().zip(all_leaves) {
-		tx.send(leaf)
+		tx.send(leaf).await
 			.map_err(|_| "Failed to send array to column writer".to_string())?;
 	}
 	Ok(())
@@ -123,7 +123,7 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 	}
 
 	/// Write a RecordBatch into the current row group, spawning column-level parallelism.
-	pub fn write_batch(&mut self, batch: &RecordBatch, batch_bytes: usize) -> Result<(), String> {
+	pub async fn write_batch(&mut self, batch: &RecordBatch, batch_bytes: usize) -> Result<(), String> {
 		assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
 		self.ensure_row_group()?;
@@ -134,7 +134,7 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 			)
 		});
 		if new_row_group {
-			self.flush_row_group()?;
+			self.flush_row_group().await?;
 			self.ensure_row_group()?;
 		}
 
@@ -143,7 +143,7 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 			&row_group.senders,
 			batch,
 			&self.arrow_schema,
-		)?;
+		).await?;
 
 		row_group.rows += batch.num_rows();
 		row_group.bytes += batch_bytes;
@@ -154,16 +154,17 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 	}
 
 	/// Finish the current row group and append to the parquet file.
-	pub fn flush_row_group(&mut self) -> Result<(), String> {
+	pub async fn flush_row_group(&mut self) -> Result<(), String> {
 		let Some(row_group) = self.row_group.take() else {
 			return Ok(());
 		};
 		// close senders to signal end-of-stream
 		drop(row_group.senders);
-		let results: Vec<_> = row_group.handles.into_iter().enumerate().map(|(i, handle)|
-			handle.join().map_err(|_| format!("Column thread {i} panicked!"))?
-		).collect();
-		let chunks = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+		let mut chunks = Vec::with_capacity(row_group.handles.len());
+		for (i, handle) in row_group.handles.into_iter().enumerate() {
+			chunks.push(handle.await
+				.map_err(|e| format!("Column task {i} failed: {e}"))??);
+		}
 
 		// append chunks to a new row group
 		let mut rg = self
@@ -184,8 +185,8 @@ impl<W: Write + Send> ArrowParallelWriter<W> {
 	}
 
 	/// Close writer and return stats.
-	pub fn close(mut self) -> Result<WriterStats, String> {
-		self.flush_row_group()?;
+	pub async fn close(mut self) -> Result<WriterStats, String> {
+		self.flush_row_group().await?;
 		self.file_writer
 			.close()
 			.map_err(|e| format!("Closing file failed: {}", e))?;
@@ -202,8 +203,8 @@ mod tests {
 	use parquet::schema::parser::parse_message_type;
 	use std::io::Cursor;
 
-	#[test]
-	fn byte_limit_starts_a_new_row_group_before_it_is_exceeded() {
+	#[tokio::test]
+	async fn byte_limit_starts_a_new_row_group_before_it_is_exceeded() {
 		let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new("value", DataType::Int32, false)]));
 		let parquet_schema = Arc::new(parse_message_type("message schema { REQUIRED INT32 value; }").unwrap());
 		let props = Arc::new(WriterProperties::builder().build());
@@ -223,10 +224,10 @@ mod tests {
 				arrow_schema.clone(),
 				vec![Arc::new(Int32Array::from(values.to_vec())) as ArrayRef],
 			).unwrap();
-			writer.write_batch(&batch, 10).unwrap();
+			writer.write_batch(&batch, 10).await.unwrap();
 		}
 
-		let stats = writer.close().unwrap();
+		let stats = writer.close().await.unwrap();
 		assert_eq!(stats.rows, 4);
 		assert_eq!(stats.bytes, 20);
 		assert_eq!(stats.groups, 2);

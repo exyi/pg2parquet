@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::error::Error;
+use futures_util::StreamExt;
 use parquet::basic::{self, ConvertedType, IntType, LogicalType, Repetition};
 use parquet::data_type::{DataType, BoolType, Int32Type, Int64Type, FloatType, DoubleType, ByteArray, ByteArrayType, FixedLenByteArrayType, FixedLenByteArray};
 use parquet::file::properties::WriterPropertiesPtr;
@@ -16,8 +17,7 @@ use parquet::file::writer::SerializedFileWriter;
 use pg_bigdecimal::PgNumeric;
 use postgres::error::SqlState;
 use postgres::types::{Kind, Type as PgType, FromSql};
-use postgres::{self, Client, RowIter, Row, Column, Statement, NoTls};
-use postgres::fallible_iterator::FallibleIterator;
+use postgres::{self, Client, Row, Column, NoTls};
 use parquet::schema::types::{GroupTypeBuilder, PrimitiveTypeBuilder, Type as ParquetType, TypePtr};
 use half::f16;
 use arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField};
@@ -220,7 +220,7 @@ fn process_connection_string_parse_error(_args: &PostgresConnArgs, conn_str: &st
 	format!("Failed to parse connection string: {e}{help}")
 }
 
-fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<Client, String> {
+async fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<(Client, tokio::task::JoinHandle<Result<(), postgres::Error>>), String> {
 	let mut config = postgres::Config::new();
 
 	let connection_string = args.connection_string.clone()
@@ -287,24 +287,55 @@ fn pg_connect(args: &PostgresConnArgs, quiet: bool) -> Result<Client, String> {
 	};
 	let connector = build_tls_connector(&args.ssl_root_cert, allow_invalid_certs, client_cert)?;
 
-	let client = config.connect(connector).map_err(|e| process_conn_error(e, args))?;
+	let (client, connection) = config.connect(connector).await.map_err(|e| process_conn_error(e, args))?;
+	let connection = tokio::spawn(connection);
 
-	Ok(client)
+	Ok((client, connection))
 }
 
 pub fn execute_copy(
+	pg_args: PostgresConnArgs,
+	query: String,
+	output_file: PathBuf,
+	output_props: WriterPropertiesPtr,
+	quiet: bool,
+	schema_settings: SchemaSettings,
+	threads: usize,
+	row_group_byte_limit: usize,
+) -> Result<WriterStats, String> {
+	let threads = if threads == 0 {
+		std::thread::available_parallelism().map_or(1, |x| x.get())
+	} else {
+		threads
+	};
+
+	let runtime = tokio::runtime::Builder::new_multi_thread()
+		.worker_threads(threads)
+		.enable_all()
+		.build()
+		.map_err(|e| format!("Failed to create worker runtime: {e}"))?;
+	let task = runtime.spawn(async move {
+		execute_copy_async(
+			&pg_args, &query, &output_file, output_props, quiet, &schema_settings,
+			row_group_byte_limit,
+		).await
+	});
+	runtime.block_on(task)
+		.map_err(|e| format!("Export task failed: {e}"))?
+}
+
+async fn execute_copy_async(
 	pg_args: &PostgresConnArgs,
 	query: &str,
 	output_file: &PathBuf,
 	output_props: WriterPropertiesPtr,
 	quiet: bool,
 	schema_settings: &SchemaSettings,
-	_threads: usize,
 	row_group_byte_limit: usize,
 ) -> Result<WriterStats, String> {
 
-	let mut client = pg_connect(pg_args, quiet)?;
-	let statement = client.prepare(query).map_err(|db_err| { format!("Prepare statement failed: {db_err} ({})", db_err.as_db_error().map_or("no message", |e| e.message())) })?;
+	let (client, connection) = pg_connect(pg_args, quiet).await?;
+	let statement = client.prepare(query).await.map_err(|db_err| { format!("Prepare statement failed: {db_err} ({})", db_err.as_db_error().map_or("no message", |e| e.message())) })?;
 
 	if statement.columns().is_empty() {
 		return Err("The query must return at least one column".to_string());
@@ -338,40 +369,48 @@ pub fn execute_copy(
 		pq_writer, arrow_schema.clone(), settings,
 	);
 
-	let mut flush_batch = |appenders: &mut [DynColumnAppender<Row>], bytes| {
+	let flush_batch = |appenders: &mut [DynColumnAppender<Row>]| {
 		let arrays = appenders.iter_mut().enumerate()
 			.map(|(i, appender)| appender.to_arrow_array()
 				.map_err(|e| format!("Failed Arrow conversion of column {}: {e}", arrow_schema.fields[i].name())))
 			.collect::<Result<Vec<_>, _>>()?;
-		let batch = RecordBatch::try_new(arrow_schema.clone(), arrays)
-			.map_err(|e| format!("Failed to create RecordBatch: {e}"))?;
-		writer.write_batch(&batch, bytes)
+		RecordBatch::try_new(arrow_schema.clone(), arrays)
+			.map_err(|e| format!("Failed to create RecordBatch: {e}"))
 	};
 
 	let batch_row_limit = settings.row_group_row_limit.min(64 * 1024);
 	let batch_byte_limit = settings.row_group_byte_limit.min(16 * 1024 * 1024);
 	let mut batch_rows = 0;
 	let mut batch_bytes = 0;
-	let rows: RowIter = client.query_raw::<Statement, &i32, &[i32]>(&statement, &[])
+	let rows = client.query_raw::<_, &i32, &[i32]>(&statement, &[]).await
 		.map_err(|err| format!("Failed to execute the SQL query: {err}"))?;
-	for (row_i, row) in rows.iterator().enumerate() {
+	tokio::pin!(rows);
+	let mut row_i = 0;
+	while let Some(row) = rows.next().await {
 		let row = row.map_err(|err| format!("Error loading row from postgres: {err}"))?;
 		for (col_i, appender) in col_appenders.iter_mut().enumerate() {
 			batch_bytes += appender.copy_value(&row)
 				.map_err(|e| format!("Failed to copy row {row_i} column {col_i}: {e}"))?;
 		}
+		row_i += 1;
 		batch_rows += 1;
 		if batch_rows >= batch_row_limit || batch_bytes >= batch_byte_limit {
-			flush_batch(&mut col_appenders, batch_bytes)?;
+			let batch = flush_batch(&mut col_appenders)?;
+			writer.write_batch(&batch, batch_bytes).await?;
 			batch_rows = 0;
 			batch_bytes = 0;
 		}
 	}
 	if batch_rows > 0 {
-		flush_batch(&mut col_appenders, batch_bytes)?;
+		let batch = flush_batch(&mut col_appenders)?;
+		writer.write_batch(&batch, batch_bytes).await?;
 	}
 
-	let stats = writer.close()?;
+	let stats = writer.close().await?;
+	drop((rows, statement, client));
+	connection.await
+		.map_err(|e| format!("PostgreSQL connection task failed: {e}"))?
+		.map_err(|e| format!("PostgreSQL connection failed: {e}"))?;
 	if !quiet {
 		eprintln!("Wrote {} rows in {} row groups", stats.rows, stats.groups);
 	}
@@ -833,7 +872,7 @@ fn resolve_numeric<TRow: PgAbstractRow + 'static>(s: &SchemaSettings, name: &str
 	}
 }
 
-fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, TRow: PgAbstractRow + 'static>(
+fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + Send + 'static, TDataType, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
@@ -843,7 +882,7 @@ fn resolve_primitive<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, TRow: 
 	resolve_primitive_conv::<T, TDataType, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v.clone()))
 }
 
-fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + 'static, TRow: PgAbstractRow + 'static>(
+fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + Send + 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + Send + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	length: Option<i32>,
@@ -860,7 +899,7 @@ fn resolve_primitive_conv<T: for<'a> FromSql<'a> + Clone + 'static, TDataType, F
 	(Box::new(cp), t)
 }
 
-fn resolve_binary<T: for<'a> FromSql<'a> + Clone + 'static, TRow: PgAbstractRow + 'static>(
+fn resolve_binary<T: for<'a> FromSql<'a> + Clone + Send + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
@@ -878,8 +917,8 @@ fn resolve_borrowed_binary<T, FConversion, TRow>(
 	convert: FConversion,
 ) -> ResolvedColumn<TRow>
 where
-	T: for<'a> FromSql<'a> + 'static,
-	FConversion: for<'a> Fn(&'a T) -> &'a [u8] + 'static,
+	T: for<'a> FromSql<'a> + Send + 'static,
+	FConversion: for<'a> Fn(&'a T) -> &'a [u8] + Send + 'static,
 	TRow: PgAbstractRow + 'static,
 {
 	let schema = build_primitive_pq_type(
@@ -895,8 +934,8 @@ fn resolve_dictionary<T, FConversion, TRow>(
 	convert: FConversion,
 ) -> ResolvedColumn<TRow>
 where
-	T: for<'a> FromSql<'a> + 'static,
-	FConversion: for<'a> Fn(&'a T) -> &'a [u8] + 'static,
+	T: for<'a> FromSql<'a> + Send + 'static,
+	FConversion: for<'a> Fn(&'a T) -> &'a [u8] + Send + 'static,
 	TRow: PgAbstractRow + 'static,
 {
 	let schema = build_primitive_pq_type(
@@ -905,7 +944,7 @@ where
 	mk_resolved(c.col_i, DictionaryColumnAppender::new(convert), schema)
 }
 
-fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn(&T) -> ByteArray + 'static, TRow: PgAbstractRow + 'static>(
+fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + Send + 'static, FConversion: Fn(&T) -> ByteArray + Send + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	length: Option<i32>,
@@ -921,7 +960,7 @@ fn resolve_binary_conv<T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn
 	(cp, t)
 }
 
-fn resolve_fixlen_binary<const N: usize, T: for<'a> FromSql<'a> + Clone + 'static, FConversion: Fn(&T) -> Option<[u8; N]> + 'static, TRow: PgAbstractRow + 'static>(
+fn resolve_fixlen_binary<const N: usize, T: for<'a> FromSql<'a> + Clone + Send + 'static, FConversion: Fn(&T) -> Option<[u8; N]> + Send + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
@@ -936,7 +975,7 @@ fn resolve_fixlen_binary<const N: usize, T: for<'a> FromSql<'a> + Clone + 'stati
 	mk_resolved::<TRow, T>(c.col_i, appender, t)
 }
 
-fn resolve_vector_conv<TArr, T: 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + 'static, TRow: PgAbstractRow + 'static>(
+fn resolve_vector_conv<TArr, T: Send + 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + Send + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	length: Option<i32>,
@@ -944,7 +983,7 @@ fn resolve_vector_conv<TArr, T: 'static, TDataType, FConversion: Fn(&T) -> TData
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
 ) -> ResolvedColumn<TRow>
-	where TArr: for<'a> FromSql<'a> + Clone + 'static,
+	where TArr: for<'a> FromSql<'a> + Clone + Send + 'static,
 	      for<'a> &'a TArr: IntoIterator<Item = &'a T>,
 	      TDataType: PrimitiveParquetType, TDataType::T: Copy + RealMemorySize {
 
@@ -961,14 +1000,14 @@ fn resolve_vector_conv<TArr, T: 'static, TDataType, FConversion: Fn(&T) -> TData
 	mk_resolved::<TRow, TArr>(c.col_i, array_appender, arr_t)
 }
 
-fn resolve_vector_binary_conv<const N: usize, TArr, T: Clone + 'static, FConversion: Fn(&T) -> Option<[u8; N]> + 'static, TRow: PgAbstractRow + 'static>(
+fn resolve_vector_binary_conv<const N: usize, TArr, T: Clone + Send + 'static, FConversion: Fn(&T) -> Option<[u8; N]> + Send + 'static, TRow: PgAbstractRow + 'static>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>,
 	convert: FConversion
 ) -> ResolvedColumn<TRow>
-	where TArr: for<'a> FromSql<'a> + Clone + 'static,
+	where TArr: for<'a> FromSql<'a> + Clone + Send + 'static,
 	      for<'a> &'a TArr: IntoIterator<Item = &'a T> {
 
 	let t =
@@ -1006,7 +1045,7 @@ fn build_primitive_pq_type(name: &'_ str, data_type: parquet::basic::Type, lengt
 	t.with_logical_type(logical_type)
 }
 
-fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + 'static, TRow: PgAbstractRow>(
+fn create_primitive_appender<T: for <'a> FromSql<'a> + Send + 'static, TDataType, FConversion: Fn(&T) -> TDataType::T + Send + 'static, TRow: PgAbstractRow>(
 	c: &ColumnInfo,
 	convert: FConversion
 ) -> impl ColumnAppender<TRow>
@@ -1015,7 +1054,7 @@ fn create_primitive_appender<T: for <'a> FromSql<'a> + 'static, TDataType, FConv
 	wrap_pg_row_reader(c, basic_appender)
 }
 
-fn create_binary_appender<T: for <'a> FromSql<'a> + 'static, FConversion: Fn(&T) -> ByteArray + 'static, TRow: PgAbstractRow + 'static>(
+fn create_binary_appender<T: for <'a> FromSql<'a> + Send + 'static, FConversion: Fn(&T) -> ByteArray + Send + 'static, TRow: PgAbstractRow + 'static>(
 	c: &ColumnInfo,
 	convert: FConversion,
 ) -> DynColumnAppender<TRow> {
@@ -1032,7 +1071,7 @@ fn wrap_pg_row_reader<TRow: PgAbstractRow, T: for <'a> FromSql<'a>>(c: &ColumnIn
 	BasicPgRowColumnAppender::new(c.col_i, a)
 }
 
-fn mk_resolved<TRow: PgAbstractRow, T: for <'a> FromSql<'a> + 'static>(c: usize, a: impl ColumnAppender<T> + 'static, t: ParquetType) -> ResolvedColumn<TRow> {
+fn mk_resolved<TRow: PgAbstractRow, T: for <'a> FromSql<'a> + Send + 'static>(c: usize, a: impl ColumnAppender<T> + Send + 'static, t: ParquetType) -> ResolvedColumn<TRow> {
 	let pg_app = BasicPgRowColumnAppender::new(c, a);
 	(Box::new(pg_app), t)
 }

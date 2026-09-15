@@ -65,7 +65,7 @@ struct ExportArgs {
     /// Avoid printing unnecessary information (schema and progress). Only errors will be written to stderr
     #[arg(long, hide_short_help = true)]
     quiet: bool,
-    /// Number of threads to use for parquet writing. Set to 1 for sequential processing
+    /// Number of worker threads. Set to 0 to use all available logical CPUs, or 1 for sequential processing
     #[arg(long, hide_short_help = true, default_value = "4")]
     threads: usize,
     /// Approximate uncompressed byte limit for each Parquet row group
@@ -94,7 +94,7 @@ enum SslMode {
 pub struct PostgresConnArgs {
     /// PostgreSQL connection URL (postgres://...) or connection string. Mutually exclusive with individual connection parameters.
     /// The connection URL may be also provided using the DATABASE_URL environment variable (recommended if it contains a password)
-    /// See https://docs.rs/postgres/latest/postgres/config/struct.Config.html for a list of supported options
+    /// See https://docs.rs/tokio-postgres/latest/tokio_postgres/config/struct.Config.html for a list of supported options
     #[arg(long="connection", short='c', conflicts_with_all = ["host", "user", "dbname", "port", "password", "sslmode"])]
     connection_string: Option<String>,
 
@@ -314,7 +314,7 @@ fn perform_export(args: ExportArgs) {
     });
 
     let result = postgres_cloner::execute_copy(
-        &args.postgres, &query, &args.output_file, props, args.quiet, &settings, args.threads,
+        args.postgres, query, args.output_file, props, args.quiet, settings, args.threads,
         args.row_group_byte_limit,
     );
 
