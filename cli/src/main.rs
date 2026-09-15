@@ -69,7 +69,7 @@ struct ExportArgs {
     #[arg(long, hide_short_help = true, default_value = "4")]
     threads: usize,
     /// Approximate uncompressed byte limit for each Parquet row group
-    #[arg(long, hide_short_help = true, default_value_t = 500 * 1024 * 1024)]
+    #[arg(long, hide_short_help = true, default_value_t = 512 * 1024 * 1024)]
     row_group_byte_limit: usize,
     /// Row limit for each Parquet row group. Defaults to the parquet library limit.
     #[arg(long, hide_short_help = true)]

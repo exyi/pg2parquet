@@ -119,8 +119,21 @@ Options:
       --quiet
           Avoid printing unnecessary information (schema and progress). Only errors will be written to stderr
 
+      --threads <THREADS>
+          Number of worker threads. Set to 0 to use all available logical CPUs, or 1 for sequential processing
+          
+          [default: 4]
+
+      --row-group-byte-limit <ROW_GROUP_BYTE_LIMIT>
+          Approximate uncompressed byte limit for each Parquet row group
+          
+          [default: 536870912]
+
+      --row-group-row-limit <ROW_GROUP_ROW_LIMIT>
+          Row limit for each Parquet row group. Defaults to the parquet library limit
+
   -c, --connection <CONNECTION_STRING>
-          PostgreSQL connection URL (postgres://...) or connection string. Mutually exclusive with individual connection parameters. The connection URL may be also provided using the DATABASE_URL environment variable (recommended if it contains a password) See https://docs.rs/postgres/latest/postgres/config/struct.Config.html for a list of supported options
+          PostgreSQL connection URL (postgres://...) or connection string. Mutually exclusive with individual connection parameters. The connection URL may be also provided using the DATABASE_URL environment variable (recommended if it contains a password) See https://docs.rs/tokio-postgres/latest/tokio_postgres/config/struct.Config.html for a list of supported options
 
   -H, --host <HOST>
           Database server host
@@ -156,52 +169,52 @@ Options:
 
       --macaddr-handling <MACADDR_HANDLING>
           How to handle `macaddr` columns
-          
-          [default: text]
 
           Possible values:
           - text:       MAC address is converted to a string
           - byte-array: MAC is stored as fixed byte array of length 6
           - int64:      MAC is stored in Int64 (lowest 6 bytes)
+          
+          [default: text]
 
       --json-handling <JSON_HANDLING>
           How to handle `json` and `jsonb` columns
-          
-          [default: text]
 
           Possible values:
           - text-marked-as-json: JSON is stored as a Parquet JSON type. This is essentially the same as text, but with a different ConvertedType, so it may not be supported in all tools
           - text:                JSON is stored as a UTF8 text
+          
+          [default: text]
 
       --enum-handling <ENUM_HANDLING>
           How to handle enum (Enumerated Type) columns
-          
-          [default: text]
 
           Possible values:
           - text:       Enum is stored as the postgres enum name, Parquet LogicalType is set to ENUM
           - plain-text: Enum is stored as the postgres enum name, Parquet LogicalType is set to String
           - int:        Enum is stored as an 32-bit integer (one-based index of the value in the enum definition)
+          
+          [default: text]
 
       --interval-handling <INTERVAL_HANDLING>
           How to handle `interval` columns
-          
-          [default: interval]
 
           Possible values:
           - interval: Enum is stored as the Parquet INTERVAL type. This has lower precision than postgres interval (milliseconds instead of microseconds)
           - struct:   Enum is stored as struct { months: i32, days: i32, microseconds: i64 }, exactly as PostgreSQL stores it
+          
+          [default: interval]
 
       --numeric-handling <NUMERIC_HANDLING>
           How to handle `numeric` columns
-          
-          [default: double]
 
           Possible values:
           - decimal: Numeric is stored using the DECIMAL parquet type. Use --decimal-precision and --decimal-scale to set the desired precision and scale
           - double:  Numeric is converted to float64 (DOUBLE)
           - float32: Numeric is converted to float32 (FLOAT)
           - string:  Convert the numeric to a string and store it as UTF8 text. This option never looses precision. Note that text "NaN" may be present if NaN is present in the database
+          
+          [default: double]
 
       --decimal-scale <DECIMAL_SCALE>
           How many decimal digits after the decimal point are stored in the Parquet file in DECIMAL data type
@@ -215,18 +228,18 @@ Options:
 
       --array-handling <ARRAY_HANDLING>
           Parquet does not support multi-dimensional arrays and arrays with different starting index. pg2parquet flattens the arrays, and this options allows including the stripped information in additional columns
-          
-          [default: plain]
 
           Possible values:
           - plain:                 Postgres arrays are simply stored as Parquet LIST
           - dimensions:            Postgres arrays are stored as struct of { data: List[T], dims: List[int] }
           - dimensions+lowerbound: Postgres arrays are stored as struct of { data: List[T], dims: List[int], lower_bound: List[int] }
+          
+          [default: plain]
 
       --float16-handling <FLOAT16_HANDLING>
-          [default: float32]
-
           Possible values:
           - float32: Serialize float16 values as float32 for better compatibility. Usually, compression will handle this and it won't take significantly more space
           - float16: Use Float16 parquet logical type. Currently, compatibility with other tools is limited and the implementation in pg2parquet has performance issues, but might offer a size reduction
+          
+          [default: float32]
 ```
