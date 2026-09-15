@@ -35,6 +35,7 @@ use crate::datatypes::numeric::{new_decimal_bytes_appender, new_decimal_int_appe
 use crate::myfrom::{MyFrom, self};
 use crate::parquet_writer::{WriterStats, WriterSettings};
 use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef};
+use crate::postgresutils::identify_row;
 
 type ResolvedColumn<TRow> = (DynColumnAppender<TRow>, ParquetType);
 
@@ -390,7 +391,11 @@ async fn execute_copy_async(
 		let row = row.map_err(|err| format!("Error loading row from postgres: {err}"))?;
 		for (col_i, appender) in col_appenders.iter_mut().enumerate() {
 			batch_bytes += appender.copy_value(&row)
-				.map_err(|e| format!("Failed to copy row {row_i} column {col_i}: {e}"))?;
+				.map_err(|e| format!(
+					"Failed to copy row {row_i} [{}], column {col_i} ({}): {e}",
+					identify_row(&row),
+					arrow_schema.field(col_i).name(),
+				))?;
 		}
 		row_i += 1;
 		batch_rows += 1;
