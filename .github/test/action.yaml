@@ -16,9 +16,9 @@ runs:
     shell: bash
   - run: docker run -d --name pg2parquet-postgres1 -p 5432:5432 -e POSTGRES_PASSWORD=postgres pg2parquet-postgres
     shell: bash
-  - run: timeout 120s bash -c 'until docker exec pg2parquet-postgres1 psql -U postgres -c "select 1;"; do echo "Waiting for PG startup..."; sleep 0.3; done'
+  - run: timeout 120s bash -c 'until docker exec -e PGPASSWORD=postgres pg2parquet-postgres1 psql --host=127.0.0.1 --username=postgres --no-password -c "select 1;"; do echo "Waiting for PG startup..."; sleep 0.3; done'
     shell: bash
-  - run: docker exec pg2parquet-postgres1 psql -U postgres -c "CREATE DATABASE pg2parquet_test;"
+  - run: docker exec -e PGPASSWORD=postgres pg2parquet-postgres1 psql --host=127.0.0.1 --username=postgres --no-password -c "CREATE DATABASE pg2parquet_test;"
     shell: bash
 
   - uses: actions/setup-python@v4
@@ -42,4 +42,3 @@ runs:
       PG2PARQUET_TEST_DB_NAME: testdb
       PG2PARQUET_TEST_DB_USER: postgres
       PG2PARQUET_TEST_DB_PASSWORD: postgres
-
