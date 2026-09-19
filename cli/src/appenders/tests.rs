@@ -1,6 +1,9 @@
 use arrow::array::{Array, BinaryArray, Int32Array, ListArray, StructArray};
 use arrow::datatypes::{DataType, Field, UInt32Type};
 use parquet::data_type::Int32Type;
+use postgres::types::Type;
+use crate::datatypes::jsonb::PgRawJsonbBorrow;
+use crate::pg_custom_types::PgAny;
 use super::*;
 use super::dictionary::DictionaryColumnAppender;
 
@@ -140,4 +143,51 @@ fn dictionary_appender_deduplicates_values_and_resets() {
 		assert_eq!(dictionary.values().len(), 2);
 		assert!(dictionary.is_null(0));
 	}
+}
+
+#[test]
+fn pg_binary_appender_reads_the_rows_wire_bytes() {
+	let row = PgAny {
+		ty: Type::BYTEA,
+		value: vec![1, 2, 3],
+	};
+	let binary = ByteArrayColumnAppender::<[u8], _>::new(|bytes| bytes);
+	let mut appender = BorrowedPgRowColumnAppender::<PgBorrowRef<[u8]>, _>::new(0, binary);
+	assert_eq!(appender.copy_value(&row).unwrap(), 7);
+	assert_eq!(appender.write_null().unwrap(), 4);
+
+	let array = appender.to_arrow_array().unwrap();
+	let values = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+	assert_eq!(values.value(0), row.value.as_slice());
+	assert!(values.is_null(1));
+}
+
+#[test]
+fn pg_row_adapter_composes_with_a_str_appender() {
+	let row = PgAny {
+		ty: Type::TEXT,
+		value: b"borrowed text".to_vec(),
+	};
+	let binary = ByteArrayColumnAppender::<str, _>::new(str::as_bytes);
+	let mut appender = BorrowedPgRowColumnAppender::<PgBorrowRef<str>, _>::new(0, binary);
+	appender.copy_value(&row).unwrap();
+
+	let array = appender.to_arrow_array().unwrap();
+	let values = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+	assert_eq!(values.value(0), b"borrowed text");
+}
+
+#[test]
+fn pg_row_adapter_is_independent_of_the_json_value_type() {
+	let row = PgAny {
+		ty: Type::JSONB,
+		value: b"\x01{\"borrowed\":true}".to_vec(),
+	};
+	let binary = ByteArrayColumnAppender::<str, _>::new(str::as_bytes);
+	let mut appender = BorrowedPgRowColumnAppender::<PgRawJsonbBorrow, _>::new(0, binary);
+	appender.copy_value(&row).unwrap();
+
+	let array = appender.to_arrow_array().unwrap();
+	let values = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+	assert_eq!(values.value(0), b"{\"borrowed\":true}");
 }

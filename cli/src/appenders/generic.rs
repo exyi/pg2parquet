@@ -112,7 +112,7 @@ impl<TPg, TPq, FConversion> ColumnAppender<TPg> for PrimitiveColumnAppender<TPg,
 	}
 }
 
-pub struct ByteArrayColumnAppender<TPg, FConversion>
+pub struct ByteArrayColumnAppender<TPg: ?Sized, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
 	builder: BinaryBuilder,
@@ -121,7 +121,7 @@ pub struct ByteArrayColumnAppender<TPg, FConversion>
 	_pg: PhantomData<TPg>,
 }
 
-impl<TPg, FConversion> ByteArrayColumnAppender<TPg, FConversion>
+impl<TPg: ?Sized, FConversion> ByteArrayColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
 	pub fn new(conversion: FConversion) -> Self {
@@ -134,7 +134,7 @@ impl<TPg, FConversion> ByteArrayColumnAppender<TPg, FConversion>
 	}
 }
 
-impl<TPg, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FConversion>
+impl<TPg: ?Sized, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
 	fn write_null(&mut self) -> Result<usize, String> {
@@ -143,12 +143,15 @@ impl<TPg, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FConv
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
+		let capacity_bytes = self.builder.values_capacity();
+		let capacity_offsets = self.builder.offsets_capacity();
 		let array = Arc::new(self.builder.finish()) as ArrayRef;
+		self.builder = BinaryBuilder::with_capacity(capacity_offsets, capacity_bytes);
 		Ok(array)
 	}
 }
 
-impl<TPg, FConversion> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FConversion>
+impl<TPg: ?Sized, FConversion> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FConversion>
 	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
 {
 	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {

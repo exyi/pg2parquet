@@ -26,15 +26,16 @@ use arrow::record_batch::RecordBatch;
 use crate::datatypes::array::{PgMultidimArray, PgMultidimArrayLowerBounds};
 use crate::datatypes::pgvector::{self, PgSparseVector};
 use crate::PostgresConnArgs;
-use crate::appenders::{ArrayColumnAppender, BasicPgRowColumnAppender, ByteArrayColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, FixedLenBinaryColumnAppender, PreprocessAppender, PreprocessExt, PrimitiveColumnAppender, PrimitiveParquetType, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender, new_autoconv_generic_appender, new_static_merged_appender};
+use crate::appenders::{ArrayColumnAppender, BasicPgRowColumnAppender, BorrowedPgRowColumnAppender, ByteArrayColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, FixedLenBinaryColumnAppender, PgBorrowHelper, PgBorrowRef, PreprocessAppender, PreprocessExt, PrimitiveColumnAppender, PrimitiveParquetType, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender, new_autoconv_generic_appender, new_static_merged_appender};
 use crate::appenders::dictionary::DictionaryColumnAppender;
 use crate::datatypes::interval::PgInterval;
-use crate::datatypes::jsonb::PgRawJsonb;
+use crate::datatypes::jsonb::{PgRawJsonbBorrow};
 use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::{new_decimal_bytes_appender, new_decimal_int_appender};
+use crate::datatypes::raw_bytes::PgRawBytesBorrow;
 use crate::myfrom::{MyFrom, self};
 use crate::parquet_writer::{WriterStats, WriterSettings};
-use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny, PgAnyRef};
+use crate::pg_custom_types::{PgEnum, PgRawRange, PgAbstractRow, PgRawRecord, PgAny};
 use crate::postgresutils::identify_row;
 
 type ResolvedColumn<TRow> = (DynColumnAppender<TRow>, ParquetType);
@@ -734,14 +735,17 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 		},
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, Some(LogicalType::decimal(2, 18)), None),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, Some(LogicalType::integer(8, false)), None),
-		"bytea" => resolve_borrowed_binary::<Vec<u8>, _, _>(name, c, None, None, Vec::as_slice),
+		"bytea" => resolve_borrowed_binary::<PgBorrowRef<[u8]>, _, _>(name, c, None, None, |x| x),
 		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
-			resolve_borrowed_binary::<String, _, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8), String::as_bytes),
-		"jsonb" | "json" =>
-			resolve_borrowed_binary::<PgRawJsonb, _, _>(name, c, Some(match s.json_handling {
+			resolve_borrowed_binary::<PgBorrowRef<str>, _, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8), str::as_bytes),
+			// resolve_borrowed_binary::<PgRawBytesBorrow, _, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8), |x| x),
+		"jsonb" | "json" => {
+			let logical_type = Some(match s.json_handling {
 				SchemaSettingsJsonHandling::Text => LogicalType::String,
 				SchemaSettingsJsonHandling::TextMarkedAsJson => LogicalType::Json
-			}), None, |v| v.data.as_bytes()),
+			});
+			resolve_borrowed_binary::<PgRawJsonbBorrow, _, _>(name, c, logical_type, None, str::as_bytes)
+		},
 		"timestamptz" =>
 			resolve_primitive::<chrono::DateTime<chrono::Utc>, Int64Type, _>(name, c, Some(LogicalType::timestamp(true, basic::TimeUnit::MICROS)), None),
 		"timestamp" =>
@@ -918,22 +922,23 @@ fn resolve_binary<T: for<'a> FromSql<'a> + Clone + Send + 'static, TRow: PgAbstr
 	resolve_binary_conv::<T, _, TRow>(name, c, None, logical_type, conv_type, |v| MyFrom::my_from(v.clone()))
 }
 
-fn resolve_borrowed_binary<T, FConversion, TRow>(
+fn resolve_borrowed_binary<TBorrowed: PgBorrowHelper + Send + 'static, FBytes, TRow>(
 	name: &str,
 	c: &ColumnInfo,
 	logical_type: Option<LogicalType>,
 	conv_type: Option<ConvertedType>,
-	convert: FConversion,
+	to_bytes: FBytes,
 ) -> ResolvedColumn<TRow>
 where
-	T: for<'a> FromSql<'a> + Send + 'static,
-	FConversion: for<'a> Fn(&'a T) -> &'a [u8] + Send + 'static,
+	TBorrowed::Value: Send + 'static,
+	FBytes: for<'a> Fn(&'a TBorrowed::Value) -> &'a [u8] + Send + 'static,
 	TRow: PgAbstractRow + 'static,
 {
 	let schema = build_primitive_pq_type(
 		name, basic::Type::BYTE_ARRAY, None, logical_type, conv_type,
 	).build().unwrap();
-	mk_resolved(c.col_i, ByteArrayColumnAppender::new(convert), schema)
+	let binary_appender = ByteArrayColumnAppender::<TBorrowed::Value, _>::new(to_bytes);
+	(Box::new(BorrowedPgRowColumnAppender::<TBorrowed, _>::new(c.col_i, binary_appender)), schema)
 }
 
 fn resolve_dictionary<T, FConversion, TRow>(

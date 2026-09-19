@@ -8,9 +8,12 @@ pub trait ColumnAppenderBase {
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String>;
 }
 
-pub trait ColumnAppender<TPg>: ColumnAppenderBase {
+pub trait ColumnAppender<TPg: ?Sized>: ColumnAppenderBase {
 	fn copy_value(&mut self, value: &TPg) -> Result<usize, String>;
-	fn copy_value_opt(&mut self, value: &Option<TPg>) -> Result<usize, String> {
+	fn copy_value_opt(&mut self, value: &Option<TPg>) -> Result<usize, String>
+	where
+		TPg: Sized,
+	{
 		match value {
 			Some(value) => self.copy_value(value),
 			None => self.write_null(),
@@ -20,7 +23,7 @@ pub trait ColumnAppender<TPg>: ColumnAppenderBase {
 
 pub type DynColumnAppender<T> = Box<dyn ColumnAppender<T> + Send>;
 
-impl<T> ColumnAppenderBase for DynColumnAppender<T> {
+impl<T: ?Sized> ColumnAppenderBase for DynColumnAppender<T> {
     fn write_null(&mut self) -> Result<usize, String> {
         self.as_mut().write_null()
     }
@@ -30,7 +33,7 @@ impl<T> ColumnAppenderBase for DynColumnAppender<T> {
 	}
 }
 
-impl<T> ColumnAppender<T> for DynColumnAppender<T> {
+impl<T: ?Sized> ColumnAppender<T> for DynColumnAppender<T> {
     fn copy_value(&mut self, value: &T) -> Result<usize, String> {
         self.as_mut().copy_value(value)
     }

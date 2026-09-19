@@ -4,3 +4,4 @@ pub mod jsonb;
 pub mod interval;
 pub mod array;
 pub mod pgvector;
+pub mod raw_bytes;
