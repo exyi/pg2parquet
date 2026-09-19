@@ -207,11 +207,3 @@ impl<const N: usize, TPg, FConversion> ColumnAppender<TPg> for FixedLenBinaryCol
 		Ok(N)
 	}
 }
-
-pub fn new_autoconv_byte_array_binary_appender<TPg>() -> PrimitiveColumnAppender<TPg, ByteArrayType, impl Fn(&TPg) -> PqByteArray>
-	where
-		TPg: Clone,
-		PqByteArray: MyFrom<TPg>,
-{
-	PrimitiveColumnAppender::new(|value: &TPg| MyFrom::my_from((*value).clone()))
-}

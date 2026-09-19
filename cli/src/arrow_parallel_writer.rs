@@ -44,14 +44,17 @@ fn spawn_column_parallel_row_group_writer<W: Write + Send>(
 
 	let mut handles = Vec::with_capacity(col_writers.len());
 	let mut senders = Vec::with_capacity(col_writers.len());
-	for mut writer in col_writers {
+	for (col_i, mut writer) in col_writers.into_iter().enumerate() {
 		let (tx, mut rx) = channel::<ArrowLeafColumn>(channel_buffer);
 		senders.push(tx);
 		handles.push(tokio::spawn(async move {
 			while let Some(col) = rx.recv().await {
-				writer.write(&col).map_err(|e| format!("Column write failed: {e}"))?;
+				// print this error, it may not be retrieved from the async task,
+				// and multiple errors could happen in parallel (all presumably relevant)
+				writer.write(&col)
+					.inspect_err(|e| eprintln!("Writer of column {col_i} failed: {e}"))
+					.map_err(|e| format!("Column {col_i} write failed: {e}"))?;
 			}
-			// Closing may encode and compress buffered pages too.
 			writer.close().map_err(|e| format!("Closing column writer failed: {e}"))
 		}));
 	}
@@ -80,7 +83,7 @@ async fn send_arrays_to_col_writers(
 	}
 	for (tx, leaf) in col_array_channels.iter().zip(all_leaves) {
 		tx.send(leaf).await
-			.map_err(|_| "Failed to send array to column writer".to_string())?;
+			.map_err(|e| format!("Failed to send array to column writer: {e}"))?;
 	}
 	Ok(())
 }

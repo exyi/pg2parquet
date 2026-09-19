@@ -364,7 +364,9 @@ async fn execute_copy_async(
 		row_group_row_limit: output_props.max_row_group_row_count().unwrap_or(usize::MAX),
 	};
 
-	let output_file_f = std::fs::File::create(output_file).unwrap();
+	let output_file_f = std::fs::File::create(output_file).map_err(|e|
+		format!("Cannot create the output file {output_file:?}: {e}")
+	)?;
 	let pq_writer = SerializedFileWriter::new(output_file_f, schema, output_props)
 		.map_err(|e| format!("Failed to create parquet writer: {e}"))?;
 	let mut writer = crate::arrow_parallel_writer::ArrowParallelWriter::new(
@@ -384,30 +386,32 @@ async fn execute_copy_async(
 	let batch_byte_limit = settings.row_group_byte_limit.min(16 * 1024 * 1024);
 	let mut batch_rows = 0;
 	let mut batch_bytes = 0;
-	let rows = client.query_raw::<_, &i32, &[i32]>(&statement, &[]).await
-		.map_err(|err| format!("Failed to execute the SQL query: {err}"))?;
-	tokio::pin!(rows);
-	let mut row_i = 0;
-	while let Some(row) = rows.next().await {
-		let row = row.map_err(|err| format!("Error loading row from postgres: {err}"))?;
-		for (col_i, appender) in col_appenders.iter_mut().enumerate() {
-			batch_bytes += appender.copy_value(&row)
-				.map_err(|e| format!(
-					"Failed to copy row {row_i} [{}], column {col_i} ({}): {e}",
-					identify_row(&row),
-					arrow_schema.field(col_i).name(),
-				))?;
-		}
-		row_i += 1;
-		batch_rows += 1;
-		if batch_rows >= batch_row_limit || batch_bytes >= batch_byte_limit {
-			let batch = flush_batch(&mut col_appenders)?;
-			writer.write_batch(&batch, batch_bytes).await?;
-			if !quiet {
-				writer.print_stats(false);
+	{
+		let rows = client.query_raw::<_, &i32, &[i32]>(&statement, &[]).await
+			.map_err(|err| format!("Failed to execute the SQL query: {err}"))?;
+		tokio::pin!(rows);
+		let mut row_i = 0;
+		while let Some(row) = rows.next().await {
+			let row = row.map_err(|err| format!("Error loading row from postgres: {err}"))?;
+			for (col_i, appender) in col_appenders.iter_mut().enumerate() {
+				batch_bytes += appender.copy_value(&row)
+					.map_err(|e| format!(
+						"Failed to copy row {row_i} [{}], column {col_i} ({}): {e}",
+						identify_row(&row),
+						arrow_schema.field(col_i).name(),
+					))?;
 			}
-			batch_rows = 0;
-			batch_bytes = 0;
+			row_i += 1;
+			batch_rows += 1;
+			if batch_rows >= batch_row_limit || batch_bytes >= batch_byte_limit {
+				let batch = flush_batch(&mut col_appenders)?;
+				writer.write_batch(&batch, batch_bytes).await?;
+				if !quiet {
+					writer.print_stats(false);
+				}
+				batch_rows = 0;
+				batch_bytes = 0;
+			}
 		}
 	}
 	if batch_rows > 0 {
@@ -420,7 +424,7 @@ async fn execute_copy_async(
 		writer.print_stats(true);
 	}
 	let stats = writer.close().await?;
-	drop((rows, statement, client));
+	drop((statement, client));
 	connection.await
 		.map_err(|e| format!("PostgreSQL connection task failed: {e}"))?
 		.map_err(|e| format!("PostgreSQL connection failed: {e}"))?;
