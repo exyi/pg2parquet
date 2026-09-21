@@ -47,3 +47,5 @@ class TestBenchmarkCommand(unittest.TestCase):
             for command in commands:
                 self.assertEqual(command[command.index("--output-file") + 1], output)
                 self.assertEqual(command[command.index("--query") + 1], query)
+                expected_threads = "1" if command[0] == "taskset" else "0"
+                self.assertEqual(command[command.index("--threads") + 1], expected_threads)

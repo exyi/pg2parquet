@@ -383,10 +383,13 @@ def main() -> None:
             print(f"hyperfine failed with exit code {e.returncode}", file=sys.stderr)
             sys.exit(e.returncode)
     
-    runs = [(f"norm_{n}", c) for (n, c) in scenarios]
+    runs = [(f"norm_{n}", [*c, "--threads", "0"]) for (n, c) in scenarios]
     if shutil.which("taskset"):
         cpu = min(os.sched_getaffinity(0))
-        runs.extend([(f"thread1_{n}", ["taskset", "-c", str(cpu), *c]) for (n, c) in scenarios])
+        runs.extend([
+            (f"thread1_{n}", ["taskset", "-c", str(cpu), *c, "--threads", "1"])
+            for (n, c) in scenarios
+        ])
     else:
         print("Warning: 'taskset' not found. Skipping pinned single-core scenarios.", file=sys.stderr)
 
