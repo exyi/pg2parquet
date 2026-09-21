@@ -29,7 +29,8 @@ use crate::PostgresConnArgs;
 use crate::appenders::{ArrayColumnAppender, BasicPgRowColumnAppender, BorrowedPgRowColumnAppender, ByteArrayColumnAppender, ColumnAppender, ColumnAppenderBase, DynColumnAppender, DynamicMergedAppender, FixedLenBinaryColumnAppender, PgBorrowHelper, PgBorrowRef, PreprocessAppender, PreprocessExt, PrimitiveColumnAppender, PrimitiveParquetType, RealMemorySize, StaticMergedAppender, UnwrapOptionAppender, new_autoconv_generic_appender, new_static_merged_appender};
 use crate::appenders::dictionary::DictionaryColumnAppender;
 use crate::datatypes::interval::PgInterval;
-use crate::datatypes::jsonb::{PgRawJsonbBorrow};
+use crate::datatypes::jsonb::PgRawJsonbBorrow;
+use crate::datatypes::xml::PgXmlBorrow;
 use crate::datatypes::money::PgMoney;
 use crate::datatypes::numeric::{new_decimal_bytes_appender, new_decimal_int_appender};
 use crate::datatypes::raw_bytes::PgRawBytesBorrow;
@@ -740,9 +741,10 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 		"money" => resolve_primitive::<PgMoney, Int64Type, _>(name, c, Some(LogicalType::decimal(2, 18)), None),
 		"char" => resolve_primitive::<i8, Int32Type, _>(name, c, Some(LogicalType::integer(8, false)), None),
 		"bytea" => resolve_borrowed_binary::<PgBorrowRef<[u8]>, _, _>(name, c, None, None, |x| x),
-		"name" | "text" | "xml" | "bpchar" | "varchar" | "citext" =>
+		"name" | "text" | "bpchar" | "varchar" | "citext" =>
 			resolve_borrowed_binary::<PgBorrowRef<str>, _, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8), str::as_bytes),
 			// resolve_borrowed_binary::<PgRawBytesBorrow, _, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8), |x| x),
+		"xml" => resolve_borrowed_binary::<PgXmlBorrow, _, _>(name, c, Some(LogicalType::String), Some(ConvertedType::UTF8), str::as_bytes),
 		"jsonb" | "json" => {
 			let logical_type = Some(match s.json_handling {
 				SchemaSettingsJsonHandling::Text => LogicalType::String,

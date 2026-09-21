@@ -47,13 +47,14 @@ class TestBasic(unittest.TestCase):
     def test_textish_types(self):
         file = wrappers.create_and_export(
             "texttish_types", "id",
-            "id text, name name, citext citext, json json, jsonb jsonb, char char(10), varchar varchar(10)",
-            "('id', 'name', 'CiTeXt', '{\"json\": true}', '{\"jsonb\": true}', 'char', 'varchar'), ('id2', NULL, NULL, NULL, NULL, NULL, NULL)"
+            "id text, name name, citext citext, json json, jsonb jsonb, xml xml, char char(10), varchar varchar(10)",
+            "('id', 'name', 'CiTeXt', '{\"json\": true}', '{\"jsonb\": true}', '<root>xml</root>', 'char', 'varchar'), "
+            "('id2', NULL, NULL, NULL, NULL, NULL, NULL, NULL)"
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
-            ("id", "name", "CiTeXt", "{\"json\": true}", "{\"jsonb\": true}", "char      ", "varchar"),
-            ("id2", None, None, None, None, None, None)
+            ("id", "name", "CiTeXt", "{\"json\": true}", "{\"jsonb\": true}", "<root>xml</root>", "char      ", "varchar"),
+            ("id2", None, None, None, None, None, None, None)
         ])
 
     def test_integer_types(self):
