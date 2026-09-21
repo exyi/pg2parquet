@@ -1,8 +1,16 @@
 use std::{marker::PhantomData, sync::Arc};
-use arrow::array::{ArrayBuilder, ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder};
+use arrow::array::{Array, ArrayBuilder, ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder};
 use parquet::data_type::{DataType, ByteArray as PqByteArray, ByteArrayType};
 use crate::myfrom::MyFrom;
 use super::{real_memory_size::RealMemorySize, ColumnAppender, ColumnAppenderBase};
+
+fn next_capacity(capacity: usize, used: usize) -> usize {
+	if used < capacity / 4 {
+		(capacity / 2).max(used)
+	} else {
+		capacity.max(used)
+	}
+}
 
 pub trait PrimitiveParquetType: DataType
 	where Self::T: Clone + RealMemorySize
@@ -143,10 +151,12 @@ impl<TPg: ?Sized, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TP
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
-		let capacity_bytes = self.builder.values_capacity();
-		let capacity_offsets = self.builder.offsets_capacity();
+		let capacity_bytes = next_capacity(self.builder.values_capacity(), self.builder.values_slice().len());
+		// with_capacity takes an item count, excluding the terminal offset
+		//                                                                vvvv
+		let capacity_items = next_capacity(self.builder.offsets_capacity() - 1, self.builder.len());
 		let array = Arc::new(self.builder.finish()) as ArrayRef;
-		self.builder = BinaryBuilder::with_capacity(capacity_offsets, capacity_bytes);
+		self.builder = BinaryBuilder::with_capacity(capacity_items, capacity_bytes);
 		Ok(array)
 	}
 }
@@ -191,8 +201,10 @@ impl<const N: usize, TPg, FConversion> ColumnAppenderBase for FixedLenBinaryColu
 	}
 
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
-		let array = Arc::new(self.builder.finish()) as ArrayRef;
-		Ok(array)
+		let array = self.builder.finish();
+		let capacity = next_capacity(array.values().capacity() / N, array.len());
+		self.builder = FixedSizeBinaryBuilder::with_capacity(capacity, N.try_into().unwrap());
+		Ok(Arc::new(array))
 	}
 }
 
