@@ -1,4 +1,4 @@
-use std::{ops::Sub, net::IpAddr};
+use std::ops::Sub;
 
 use bit_vec::BitVec;
 use chrono::{Datelike, format::Fixed};
@@ -107,12 +107,6 @@ impl<'a> MyFrom<eui48::MacAddress> for i64 {
 		let mut b = [0u8; 8];
 		b[2..8].copy_from_slice(t.as_bytes());
 		i64::from_be_bytes(b)
-	}
-}
-impl<'a> MyFrom<IpAddr> for ByteArray {
-	fn my_from(t: IpAddr) -> Self {
-		let str = t.to_string();
-		ByteArray::from(str.into_bytes())
 	}
 }
 impl<'a> MyFrom<BitVec> for ByteArray {

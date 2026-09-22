@@ -1,5 +1,6 @@
 pub mod numeric;
 pub mod money;
+pub mod network;
 pub mod jsonb;
 pub mod xml;
 pub mod interval;

@@ -32,6 +32,7 @@ use crate::datatypes::interval::PgInterval;
 use crate::datatypes::jsonb::PgRawJsonbBorrow;
 use crate::datatypes::xml::PgXmlBorrow;
 use crate::datatypes::money::PgMoney;
+use crate::datatypes::network::PgNetwork;
 use crate::datatypes::numeric::{new_decimal_bytes_appender, new_decimal_int_appender};
 use crate::datatypes::raw_bytes::PgRawBytesBorrow;
 use crate::myfrom::{MyFrom, self};
@@ -773,8 +774,8 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 				SchemaSettingsMacaddrHandling::Int64 =>
 					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, Some(LogicalType::integer(64, false)), None),
 			},
-		"inet" =>
-			resolve_binary::<IpAddr, _>(name, c, Some(LogicalType::String), None),
+		"inet" | "cidr" =>
+			resolve_binary::<PgNetwork, _>(name, c, Some(LogicalType::String), None),
 		"bit" | "varbit" =>
 			resolve_binary::<bit_vec::BitVec, _>(name, c, Some(LogicalType::String), None),
 
@@ -804,7 +805,7 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 				},
 			},
 
-		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Cidr Unknown Circle Macaddr8 Aclitem Bpchar Timetz Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
+		// TODO: Regproc Tid Xid Cid PgNodeTree Point Lseg Path Box Polygon Line Unknown Circle Macaddr8 Aclitem Bpchar Timetz Refcursor Regprocedure Regoper Regoperator Regclass Regtype TxidSnapshot PgLsn PgNdistinct PgDependencies TsVector Tsquery GtsVector Regconfig Regdictionary Jsonpath Regnamespace Regrole Regcollation PgMcvList PgSnapshot Xid9
 
 
 		// pgvector extension: vector = 32-bit float array, halfvec = 16-bit float array, sparsevec = sparse f32 vector

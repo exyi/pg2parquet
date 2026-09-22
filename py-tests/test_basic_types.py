@@ -82,23 +82,27 @@ class TestBasic(unittest.TestCase):
             (3, None),
         ])
 
-    def test_inet_preserves_addresses_and_prefix_lengths(self):
+    def test_inet_and_cidr_preserve_addresses_and_prefix_lengths(self):
         file = wrappers.create_and_export(
-            "inet_types", "id",
-            "id int, address inet",
-            "(1, '192.0.2.1'), (2, '2001:db8::1'), (3, '1.0.0.1'), (4, '64:ff9b::1.1.1.1'), "
-            # "(5, '192.0.2.1/24'), (6, '2001:db8::1/64'), "
-            "(7, NULL)",
+            "network_types", "id",
+            "id int, address inet, network cidr",
+            "(1, '192.0.2.1', '192.0.2.0/24'), "
+            "(2, '2001:db8::1', '2001:db8::/32'), "
+            "(3, '1.0.0.1', '0.0.0.0/0'), "
+            "(4, '64:ff9b::1.1.1.1', '::/0'), "
+            "(5, '192.0.2.1/24', '192.0.2.1/32'), "
+            "(6, '2001:db8::1/64', '2001:db8::1/128'), "
+            "(7, NULL, NULL)",
         )
 
         self.assertEqual(duckdb.read_parquet(file).fetchall(), [
-            (1, "192.0.2.1"),
-            (2, "2001:db8::1"),
-            (3, "1.0.0.1"),
-            (4, "64:ff9b::101:101"),
-            # (5, "192.0.2.1/24"),  TODO: fix inet + add cidr
-            # (6, "2001:db8::1/64"),
-            (7, None),
+            (1, "192.0.2.1", "192.0.2.0/24"),
+            (2, "2001:db8::1", "2001:db8::/32"),
+            (3, "1.0.0.1", "0.0.0.0/0"),
+            (4, "64:ff9b::101:101", "::/0"),
+            (5, "192.0.2.1/24", "192.0.2.1/32"),
+            (6, "2001:db8::1/64", "2001:db8::1/128"),
+            (7, None, None),
         ])
 
     def test_macaddr_handling(self):
