@@ -57,6 +57,86 @@ class TestBasic(unittest.TestCase):
             ("id2", None, None, None, None, None, None, None)
         ])
 
+    def test_json_logical_type(self):
+        file = wrappers.create_and_export(
+            "json_logical_types", "id",
+            "id int, document_json json, document_jsonb jsonb",
+            "(1, '{\"kind\": \"json\"}', '{\"kind\": \"jsonb\"}'), (2, NULL, NULL)",
+            options=["--json-handling=text-marked-as-json"],
+        )
+
+        schema = pq.ParquetFile(file).schema
+        self.assertEqual(str(schema.column(1).logical_type), "JSON")
+        self.assertEqual(str(schema.column(2).logical_type), "JSON")
+
+    def test_money(self):
+        file = wrappers.create_and_export(
+            "money_types", "id",
+            "id int, amount money",
+            "(1, 12.34::numeric::money), (2, (-56.78::numeric)::money), (3, NULL)",
+        )
+
+        self.assertEqual(duckdb.read_parquet(file).fetchall(), [
+            (1, Decimal("12.34")),
+            (2, Decimal("-56.78")),
+            (3, None),
+        ])
+
+    def test_inet_preserves_addresses_and_prefix_lengths(self):
+        file = wrappers.create_and_export(
+            "inet_types", "id",
+            "id int, address inet",
+            "(1, '192.0.2.1'), (2, '2001:db8::1'), (3, '1.0.0.1'), (4, '64:ff9b::1.1.1.1'), "
+            # "(5, '192.0.2.1/24'), (6, '2001:db8::1/64'), "
+            "(7, NULL)",
+        )
+
+        self.assertEqual(duckdb.read_parquet(file).fetchall(), [
+            (1, "192.0.2.1"),
+            (2, "2001:db8::1"),
+            (3, "1.0.0.1"),
+            (4, "64:ff9b::101:101"),
+            # (5, "192.0.2.1/24"),  TODO: fix inet + add cidr
+            # (6, "2001:db8::1/64"),
+            (7, None),
+        ])
+
+    def test_macaddr_handling(self):
+        file = wrappers.create_and_export(
+            "macaddr_types", "id",
+            "id int, address macaddr",
+            "(1, '00:00:00:00:00:01'), (2, '12:34:56:78:9a:bc'), "
+            "(3, 'ff:ff:ff:ff:ff:ff'), (4, NULL)",
+        )
+        self.assertEqual(duckdb.read_parquet(file).fetchall(), [
+            (1, "00:00:00:00:00:01"),
+            (2, "12:34:56:78:9a:bc"),
+            (3, "ff:ff:ff:ff:ff:ff"),
+            (4, None),
+        ])
+
+        byte_array_file = wrappers.run_export_table(
+            "macaddr_types_byte_array", "macaddr_types", "id",
+            options=["--macaddr-handling=byte-array"],
+        )
+        self.assertEqual(duckdb.read_parquet(byte_array_file).fetchall(), [
+            (1, bytes.fromhex("000000000001")),
+            (2, bytes.fromhex("123456789abc")),
+            (3, bytes.fromhex("ffffffffffff")),
+            (4, None),
+        ])
+
+        int64_file = wrappers.run_export_table(
+            "macaddr_types_int64", "macaddr_types", "id",
+            options=["--macaddr-handling=int64"],
+        )
+        self.assertEqual(duckdb.read_parquet(int64_file).fetchall(), [
+            (1, int.from_bytes(bytes.fromhex("000000000001"), "big")),
+            (2, int.from_bytes(bytes.fromhex("123456789abc"), "big")),
+            (3, int.from_bytes(bytes.fromhex("ffffffffffff"), "big")),
+            (4, None),
+        ])
+
     def test_integer_types(self):
         file = wrappers.create_and_export(
             "integer_types", "id",

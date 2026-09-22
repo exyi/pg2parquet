@@ -771,7 +771,7 @@ fn map_simple_type<TRow: PgAbstractRow + 'static>(
 				SchemaSettingsMacaddrHandling::ByteArray =>
 					resolve_fixlen_binary::<6, eui48::MacAddress, _, _>(name, c, None, None, |v| Some(v.to_array())),
 				SchemaSettingsMacaddrHandling::Int64 =>
-					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, None, None),
+					resolve_primitive::<eui48::MacAddress, Int64Type, _>(name, c, Some(LogicalType::integer(64, false)), None),
 			},
 		"inet" =>
 			resolve_binary::<IpAddr, _>(name, c, Some(LogicalType::String), None),

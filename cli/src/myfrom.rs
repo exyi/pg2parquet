@@ -105,7 +105,7 @@ impl<'a> MyFrom<eui48::MacAddress> for FixedLenByteArray {
 impl<'a> MyFrom<eui48::MacAddress> for i64 {
 	fn my_from(t: eui48::MacAddress) -> Self {
 		let mut b = [0u8; 8];
-		b[0..6].copy_from_slice(t.as_bytes());
+		b[2..8].copy_from_slice(t.as_bytes());
 		i64::from_be_bytes(b)
 	}
 }
