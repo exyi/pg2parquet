@@ -63,7 +63,7 @@ You can use `$DATABASE_URL` variable to specify the full connection string.
 	* `money` is always a 64-bit decimal with 2 decimal places
 * **`json` and `jsonb`**: by default serialized as a text field with the JSON. `--json-handling` option allows setting parquet LogicalType to [JSON](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md#json), but the feature is not widely supported, thus it's disabled by default.
 * **`xml`**: serialized as text
-* **`macaddr` and `inet`**: by default written out in text representation. It's possible to serialize macaddr as bytes or Int64 using `--macaddr-handling` option.
+* **`macaddr`, `cidr`, `inet`**: by default written out in text representation. It's possible to serialize macaddr as bytes or Int64 using `--macaddr-handling` option.
 * **`bit` and `varbit`**: represented as text of `0` and `1`
 * **[Enums](https://www.postgresql.org/docs/current/datatype-enum.html)**
 	* By default serialized as text, use `--enum-handling int` to serialize them as integers

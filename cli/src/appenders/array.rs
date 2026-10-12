@@ -46,13 +46,12 @@ impl<TPg, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner>
 	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
 		let child_arr = self.inner.to_arrow_array()?;
 		let child_field_ref = Arc::new(ArrowField::new(&self.element_name, child_arr.data_type().clone(), self.allow_element_null));
-		let list_nulls: Option<NullBuffer> = if self.allow_null { self.valid_builder.finish() } else { None };
-		let offsets_buf: OffsetBuffer<i32> = self.offsets_builder.finish_cloned();
+		let list_nulls: Option<NullBuffer> = if self.allow_null {
+			std::mem::replace(&mut self.valid_builder, NullBufferBuilder::new(65536)).finish()
+		} else { None };
+		let offsets_buf: OffsetBuffer<i32> = std::mem::replace(&mut self.offsets_builder, OffsetBufferBuilder::new(65536)).finish();
 		let list = ListArray::try_new(child_field_ref.clone(), offsets_buf, child_arr, list_nulls)
 			.map_err(|e| format!("ListArray::try_new({child_field_ref:?}) failed: {}", e.to_string()))?;
-
-		self.offsets_builder = OffsetBufferBuilder::new(0);
-		self.valid_builder = NullBufferBuilder::new(0);
 
 		Ok(Arc::new(list) as ArrayRef)
 	}

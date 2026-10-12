@@ -421,8 +421,8 @@ async fn execute_copy_async(
 		writer.write_batch(&batch, batch_bytes).await?;
 	}
 
-	writer.flush_row_group().await?;
 	if !quiet {
+		writer.flush_row_group().await?;
 		writer.print_stats(true);
 	}
 	let stats = writer.close().await?;
@@ -506,14 +506,6 @@ fn format_schema(schema: &ParquetType, indent: u32) -> String {
 		}
 	}
 }
-
-fn count_columns(p: &ParquetType) -> usize {
-	match p {
-		ParquetType::PrimitiveType { .. } => 1,
-		ParquetType::GroupType { fields, .. } => fields.iter().map(|f| count_columns(f)).sum()
-	}
-}
-
 
 fn map_schema_root(row: &[Column], s: &SchemaSettings) -> Result<(Vec<DynColumnAppender<Row>>, ParquetType), String> {
 	let mut fields: Vec<ResolvedColumn<Row>> = vec![];

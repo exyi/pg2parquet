@@ -1,8 +1,8 @@
 //! Arrow-based parallel parquet writer using column-level parallelism.
 //!
-//! This module wires parquet::arrow::arrow_writer::ArrowColumnWriter to enable
-//! parallel column serialization for a single output parquet file. Each leaf
-//! column has one task; row groups are written sequentially.
+//! This module wires parquet::arrow::arrow_writer::ArrowColumnWriter, based on the
+//! DataFusion implementation in: github.com/apache/arrow-datafusion/pull/7655
+//! Row groups are currently written sequentially.
 
 use std::fmt::Display;
 use std::io::Write;

@@ -266,7 +266,8 @@ impl PgAbstractRow for PgRawRecord {
 			_ => unreachable!()
 		};
 		assert!(T::accepts(f.type_()));
-		if self.fields.len() < index {
+		if self.fields.len() <= index {
+			debug_assert!(false);
 			return T::from_sql_null(f.type_()).unwrap()
 		}
 		match &self.fields[index] {
