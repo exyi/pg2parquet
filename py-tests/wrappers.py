@@ -7,6 +7,7 @@ import pyarrow.parquet
 import polars
 import duckdb
 import atexit
+from parquet_statistics import validate_statistics
 
 env_prefix = "PG2PARQUET_TEST_"
 
@@ -36,7 +37,7 @@ if pg2parquet_binary is None or pg2parquet_user is None or pg2parquet_password i
     print(f"   {env_prefix}DB_PASSWORD{' ✅' if pg2parquet_password else ' ❌'} - password to connect to the database with")
     sys.exit(1)
 
-def pg_connect(dbname = pg2parquet_dbname):
+def pg_connect(dbname = pg2parquet_dbname) -> psycopg.Connection:
     return psycopg.connect(
         host=pg2parquet_host,
         port=pg2parquet_port,
@@ -45,15 +46,18 @@ def pg_connect(dbname = pg2parquet_dbname):
         dbname=dbname
     )
 
-def ensure_new_db(dbname):
+def ensure_db(dbname, drop_existing=True):
     conn = pg_connect("postgres")
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(sql.SQL("SELECT 1 FROM pg_database WHERE datname={}").format(sql.Literal(dbname)))
             if cur.fetchone() is not None:
-                cur.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(dbname)))
-            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
+                if drop_existing:
+                    cur.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(dbname)))
+                    cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
+            else:
+                cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
     finally:
         conn.close()
 
@@ -67,7 +71,8 @@ def ensure_new_db(dbname):
     finally:
         conn.close()
 
-ensure_new_db(pg2parquet_dbname)
+if 'unittest' in sys.modules.keys():
+    ensure_db(pg2parquet_dbname, drop_existing=True)
 
 def run_sql(*commands: Union[str, sql.SQL, sql.Composed]):
     with pg_connect() as conn:
@@ -92,6 +97,12 @@ def run_pg2parquet(args: list[str]):
         raise Exception(f"pg2parquet exited with code {r.returncode}")
     return r
 
+export_connection_args = [
+    "--host", pg2parquet_host,
+    "--port", pg2parquet_port,
+    "--user", pg2parquet_user,
+    "--dbname", pg2parquet_dbname,
+]
 
 def run_export(name, query = None, options = []) -> str:
     outfile = os.path.join(output_directory, name + ".parquet")
@@ -101,16 +112,15 @@ def run_export(name, query = None, options = []) -> str:
         query_opt = ["--table", name]
     args = [
         "export",
-        "--host", pg2parquet_host,
-        "--port", pg2parquet_port,
-        "--user", pg2parquet_user,
-        "--dbname", pg2parquet_dbname,
+        *export_connection_args,
         *query_opt,
         "--output-file", outfile,
         *options
     ]
 
     run_pg2parquet(args)
+
+    validate_statistics(outfile)
 
     return outfile
 

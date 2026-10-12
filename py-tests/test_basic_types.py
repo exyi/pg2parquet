@@ -7,6 +7,7 @@ import unittest
 import duckdb
 import polars as pl
 import pandas as pd
+import pyarrow.parquet as pq
 
 
 class TestBasic(unittest.TestCase):
@@ -46,13 +47,98 @@ class TestBasic(unittest.TestCase):
     def test_textish_types(self):
         file = wrappers.create_and_export(
             "texttish_types", "id",
-            "id text, name name, citext citext, json json, jsonb jsonb, char char(10), varchar varchar(10)",
-            "('id', 'name', 'CiTeXt', '{\"json\": true}', '{\"jsonb\": true}', 'char', 'varchar'), ('id2', NULL, NULL, NULL, NULL, NULL, NULL)"
+            "id text, name name, citext citext, json json, jsonb jsonb, xml xml, char char(10), varchar varchar(10)",
+            "('id', 'name', 'CiTeXt', '{\"json\": true}', '{\"jsonb\": true}', '<root>xml</root>', 'char', 'varchar'), "
+            "('id2', NULL, NULL, NULL, NULL, NULL, NULL, NULL)"
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
-            ("id", "name", "CiTeXt", "{\"json\": true}", "{\"jsonb\": true}", "char      ", "varchar"),
-            ("id2", None, None, None, None, None, None)
+            ("id", "name", "CiTeXt", "{\"json\": true}", "{\"jsonb\": true}", "<root>xml</root>", "char      ", "varchar"),
+            ("id2", None, None, None, None, None, None, None)
+        ])
+
+    def test_json_logical_type(self):
+        file = wrappers.create_and_export(
+            "json_logical_types", "id",
+            "id int, document_json json, document_jsonb jsonb",
+            "(1, '{\"kind\": \"json\"}', '{\"kind\": \"jsonb\"}'), (2, NULL, NULL)",
+            options=["--json-handling=text-marked-as-json"],
+        )
+
+        schema = pq.ParquetFile(file).schema
+        self.assertEqual(str(schema.column(1).logical_type), "JSON")
+        self.assertEqual(str(schema.column(2).logical_type), "JSON")
+
+    def test_money(self):
+        file = wrappers.create_and_export(
+            "money_types", "id",
+            "id int, amount money",
+            "(1, 12.34::numeric::money), (2, (-56.78::numeric)::money), (3, NULL)",
+        )
+
+        self.assertEqual(duckdb.read_parquet(file).fetchall(), [
+            (1, Decimal("12.34")),
+            (2, Decimal("-56.78")),
+            (3, None),
+        ])
+
+    def test_inet_and_cidr_preserve_addresses_and_prefix_lengths(self):
+        file = wrappers.create_and_export(
+            "network_types", "id",
+            "id int, address inet, network cidr",
+            "(1, '192.0.2.1', '192.0.2.0/24'), "
+            "(2, '2001:db8::1', '2001:db8::/32'), "
+            "(3, '1.0.0.1', '0.0.0.0/0'), "
+            "(4, '64:ff9b::1.1.1.1', '::/0'), "
+            "(5, '192.0.2.1/24', '192.0.2.1/32'), "
+            "(6, '2001:db8::1/64', '2001:db8::1/128'), "
+            "(7, NULL, NULL)",
+        )
+
+        self.assertEqual(duckdb.read_parquet(file).fetchall(), [
+            (1, "192.0.2.1", "192.0.2.0/24"),
+            (2, "2001:db8::1", "2001:db8::/32"),
+            (3, "1.0.0.1", "0.0.0.0/0"),
+            (4, "64:ff9b::101:101", "::/0"),
+            (5, "192.0.2.1/24", "192.0.2.1/32"),
+            (6, "2001:db8::1/64", "2001:db8::1/128"),
+            (7, None, None),
+        ])
+
+    def test_macaddr_handling(self):
+        file = wrappers.create_and_export(
+            "macaddr_types", "id",
+            "id int, address macaddr",
+            "(1, '00:00:00:00:00:01'), (2, '12:34:56:78:9a:bc'), "
+            "(3, 'ff:ff:ff:ff:ff:ff'), (4, NULL)",
+        )
+        self.assertEqual(duckdb.read_parquet(file).fetchall(), [
+            (1, "00:00:00:00:00:01"),
+            (2, "12:34:56:78:9a:bc"),
+            (3, "ff:ff:ff:ff:ff:ff"),
+            (4, None),
+        ])
+
+        byte_array_file = wrappers.run_export_table(
+            "macaddr_types_byte_array", "macaddr_types", "id",
+            options=["--macaddr-handling=byte-array"],
+        )
+        self.assertEqual(duckdb.read_parquet(byte_array_file).fetchall(), [
+            (1, bytes.fromhex("000000000001")),
+            (2, bytes.fromhex("123456789abc")),
+            (3, bytes.fromhex("ffffffffffff")),
+            (4, None),
+        ])
+
+        int64_file = wrappers.run_export_table(
+            "macaddr_types_int64", "macaddr_types", "id",
+            options=["--macaddr-handling=int64"],
+        )
+        self.assertEqual(duckdb.read_parquet(int64_file).fetchall(), [
+            (1, int.from_bytes(bytes.fromhex("000000000001"), "big")),
+            (2, int.from_bytes(bytes.fromhex("123456789abc"), "big")),
+            (3, int.from_bytes(bytes.fromhex("ffffffffffff"), "big")),
+            (4, None),
         ])
 
     def test_integer_types(self):
@@ -128,6 +214,12 @@ class TestBasic(unittest.TestCase):
         pd_df = pd.read_parquet(file2, engine="pyarrow")
         self.assertEqual(list(pd_df["normal"]), [Decimal('1000.000100000000000000'), None])
         self.assertEqual(list(pd_df["high_precision"]), [Decimal('1.00000000000000000000000000000000000000000001'), None])
+        parquet = pq.ParquetFile(file2)
+        for row_group_index in range(parquet.num_row_groups):
+            row_group = parquet.metadata.row_group(row_group_index)
+            # temporary workaround for https://github.com/apache/arrow-rs/issues/11073
+            assert row_group.column(1).statistics is None
+            assert row_group.column(2).statistics is None
 
     def test_decimal_i32(self):
         file = wrappers.create_and_export(
@@ -146,14 +238,29 @@ class TestBasic(unittest.TestCase):
         file = wrappers.create_and_export(
             "numeric_types", "id",
             "id int, normal numeric(10, 5), high_precision numeric(140, 100)",
-            "(1, 1000.0001, 1.00000000000000000000000000000000000000000001), (2, 'NaN', 'NaN')",
+            """(1, 1000.0001, 1.00000000000000000000000000000000000000000001),
+               (2, 'NaN', 'NaN'),
+               (3, 0.001, 10.0),
+               (4, -10, -20.1)""",
             options=["--decimal-precision=18", "--decimal-scale=9", "--numeric-handling=decimal"]
         )
         duckdb_table = duckdb.read_parquet(file).fetchall()
         self.assertEqual(duckdb_table, [
-            (1, Decimal('1000.000100000000000000'), Decimal('1.000000000000000000')),
-            (2,  None, None )
+            (1, Decimal('1000.0001'), Decimal('1')),
+            (2,  None, None),
+            (3, Decimal('0.001'), Decimal('10')),
+            (4, Decimal('-10'), Decimal('-20.1')),
         ])
+        parquet = pq.ParquetFile(file)
+        for row_group_index in range(parquet.num_row_groups):
+            row_group = parquet.metadata.row_group(row_group_index)
+            assert row_group.column(0).statistics.min == 1  # id
+            assert row_group.column(0).statistics.max == 4
+            assert row_group.column(1).statistics.min == -10  # normal
+            assert row_group.column(1).statistics.max == Decimal('1000.0001')
+            assert row_group.column(2).statistics.min == Decimal('-20.1')  # high_precision
+            assert row_group.column(2).statistics.max == 10
+
     def test_numeric_f64(self):
         file = wrappers.create_and_export(
             "numeric_types", "id",
@@ -301,4 +408,3 @@ class TestBasic(unittest.TestCase):
         })
 
     
-

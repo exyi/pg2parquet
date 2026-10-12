@@ -266,7 +266,8 @@ impl PgAbstractRow for PgRawRecord {
 			_ => unreachable!()
 		};
 		assert!(T::accepts(f.type_()));
-		if self.fields.len() < index {
+		if self.fields.len() <= index {
+			debug_assert!(false);
 			return T::from_sql_null(f.type_()).unwrap()
 		}
 		match &self.fields[index] {
@@ -312,23 +313,5 @@ impl<TRow: PgAbstractRow> PgAbstractRow for Arc<TRow> {
 
     fn ab_len(&self) -> usize {
         self.as_ref().ab_len()
-    }
-}
-
-pub struct UnclonableHack<T>(pub T);
-
-impl<T> Clone for UnclonableHack<T> {
-	fn clone(&self) -> Self {
-		panic!("Cloning of type {} is disabled", std::any::type_name::<T>())
-	}
-}
-
-impl<TRow: PgAbstractRow> PgAbstractRow for UnclonableHack<TRow> {
-    fn ab_get<'a, T: postgres::types::FromSql<'a>>(&'a self, index: usize) -> T {
-        self.0.ab_get(index)
-    }
-
-    fn ab_len(&self) -> usize {
-        self.0.ab_len()
     }
 }

@@ -1,157 +1,221 @@
-use std::{marker::PhantomData, sync::Arc, borrow::Cow};
+use std::{marker::PhantomData, sync::Arc};
+use arrow::array::{Array, ArrayBuilder, ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder};
+use parquet::data_type::{DataType, ByteArray as PqByteArray, ByteArrayType};
+use crate::myfrom::MyFrom;
+use super::{real_memory_size::RealMemorySize, ColumnAppender, ColumnAppenderBase};
 
-use parquet::{column::writer::ColumnWriter, data_type::DataType, errors::ParquetError, file::writer::SerializedColumnWriter, schema::types::ColumnDescriptor};
+fn next_capacity(capacity: usize, used: usize) -> usize {
+	if used < capacity / 4 {
+		(capacity / 2).max(used)
+	} else {
+		capacity.max(used)
+	}
+}
 
-use crate::{level_index::{LevelIndexState, LevelIndexList}, myfrom::MyFrom};
+pub trait PrimitiveParquetType: DataType
+	where Self::T: Clone + RealMemorySize
+{
+	type Builder: ArrayBuilder + Extend<Option<Self::T>> + Default;
+	const NULL_VALUE_SIZE: usize;
+	const VALUE_OVERHEAD: usize = 0;
+}
 
-use super::{real_memory_size::RealMemorySize, ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter};
+impl PrimitiveParquetType for parquet::data_type::BoolType {
+	type Builder = BooleanBuilder;
+	const NULL_VALUE_SIZE: usize = 1;
+}
+impl PrimitiveParquetType for parquet::data_type::Int32Type {
+	type Builder = Int32Builder;
+	const NULL_VALUE_SIZE: usize = 4;
+}
+impl PrimitiveParquetType for parquet::data_type::Int64Type {
+	type Builder = Int64Builder;
+	const NULL_VALUE_SIZE: usize = 8;
+}
+impl PrimitiveParquetType for parquet::data_type::FloatType {
+	type Builder = Float32Builder;
+	const NULL_VALUE_SIZE: usize = 4;
+}
+impl PrimitiveParquetType for parquet::data_type::DoubleType {
+	type Builder = Float64Builder;
+	const NULL_VALUE_SIZE: usize = 8;
+}
+impl PrimitiveParquetType for parquet::data_type::ByteArrayType {
+	type Builder = BinaryBuilder;
+	const NULL_VALUE_SIZE: usize = 4;
+	const VALUE_OVERHEAD: usize = 4;
+}
 
+pub struct PrimitiveColumnAppender<TPg, TPq, FConversion>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: RealMemorySize,
+		FConversion: Fn(&TPg) -> TPq::T,
+{
+	builder: TPq::Builder,
 
-pub struct GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
-	max_dl: i16,
-	max_rl: i16,
-	column: Vec<TPq::T>,
-	dls: Vec<i16>,
-	rls: Vec<i16>,
-	dummy: PhantomData<TPg>,
-	dummy2: PhantomData<TPq>,
-	repetition_index: LevelIndexState,
 	conversion: FConversion,
+	_pg: PhantomData<TPg>,
+	_pq: PhantomData<TPq>,
 }
 
-pub fn new_autoconv_generic_appender<TPg, TPq: DataType>(
-	max_dl: i16, max_rl: i16,
-) -> GenericColumnAppender<TPg, TPq, impl Fn(TPg) -> TPq::T>
-	where TPq::T: Clone + RealMemorySize, TPq::T: MyFrom<TPg> {
-	GenericColumnAppender::new(max_dl, max_rl, |value: TPg| MyFrom::my_from(value))
+pub fn new_autoconv_generic_appender<TPg, TPq>() -> PrimitiveColumnAppender<TPg, TPq, impl Fn(&TPg) -> TPq::T>
+	where
+		TPg: Clone,
+		TPq: PrimitiveParquetType,
+		TPq::T: Clone + RealMemorySize + MyFrom<TPg>,
+{
+	PrimitiveColumnAppender::new(|value: &TPg| MyFrom::my_from((*value).clone()))
 }
 
-impl<TPg, TPq, FConversion> GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
+impl<TPg, TPq, FConversion> PrimitiveColumnAppender<TPg, TPq, FConversion>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: RealMemorySize,
+		FConversion: Fn(&TPg) -> TPq::T,
+{
+	pub fn new(conversion: FConversion) -> Self {
+		PrimitiveColumnAppender {
+			builder: TPq::Builder::default(),
 
-	pub fn new(max_dl: i16, max_rl: i16, conversion: FConversion) -> Self {
-		if max_dl < 0 || max_rl < 0 {
-			panic!("Cannot create {} with max_dl={}, max_rl={}", std::any::type_name::<Self>(), max_dl, max_rl);
-		}
-		GenericColumnAppender {
-			max_dl, max_rl,
-			column: Vec::new(),
-			dummy: PhantomData,
-			dummy2: PhantomData,
-			dls: Vec::new(),
-			rls: Vec::new(),
-			repetition_index: LevelIndexState::new(max_rl),
 			conversion,
+			_pg: PhantomData,
+			_pq: PhantomData,
 		}
 	}
 
-	pub fn convert(&self, value: TPg) -> TPq::T {
+	pub fn convert(&self, value: &TPg) -> TPq::T {
 		(self.conversion)(value)
 	}
+}
 
-	fn write_column(&mut self, writer: &mut SerializedColumnWriter) -> Result<(), ParquetError> {
-		let dls = if self.max_dl > 0 { Some(self.dls.as_slice()) } else { None };
-		let rls = if self.max_rl > 0 { Some(self.rls.as_slice()) } else { None };
+impl<TPg, TPq, FConversion> ColumnAppenderBase for PrimitiveColumnAppender<TPg, TPq, FConversion>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: RealMemorySize,
+		FConversion: Fn(&TPg) -> TPq::T,
+{
+	fn write_null(&mut self) -> Result<usize, String> {
+		self.builder.extend([None]);
+		Ok(TPq::NULL_VALUE_SIZE)
+	}
 
-		// if self.max_rl > 0 {
-		// 	println!("Writing values: {:?}", self.column);
-		// 	println!("           RLS: {:?}", self.rls);
-		// 	println!("           DLS: {:?}", self.dls);
-		// }
-		let typed = writer.typed::<TPq>();
-		let _num_written = typed.write_batch(&self.column, dls, rls)?;
-
-		self.column.clear();
-		self.dls.clear();
-		self.rls.clear();
-
-		Ok(())
+	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
+		let array = self.builder.finish();
+		Ok(array)
 	}
 }
 
-impl<TPg, TPq, FConversion> ColumnAppenderBase for GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
-
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		let mut error = None;
-		let mut col_descriptor: Option<(Arc<ColumnDescriptor>, u64, u64)> = None;
-		let c = next_col.next_column(&mut |mut column| {
-			let result = self.write_column(&mut column);
-			col_descriptor = Some(get_column_descriptor(&mut column));
-			let error1 = result.err();
-			let result2 = column.close();
-
-			error = error1.or(result2.err());
-			
-		}).map_err(|e| format!("Could not create column[{}]: {}", column_i, e))?;
-
-		debug_assert!(col_descriptor.is_some());
-		debug_assert_eq!(col_descriptor.as_ref().unwrap().0.max_def_level(), self.max_dl, "unexpected max_dl={} in {}", self.max_dl, col_descriptor.as_ref().unwrap().0.path());
-		debug_assert_eq!(col_descriptor.as_ref().unwrap().0.max_rep_level(), self.max_rl, "unexpected max_rl={} in {}", self.max_rl, col_descriptor.as_ref().unwrap().0.path());
-
-		if error.is_some() {
-			let col_name = col_descriptor.map(|(desc, _, _)| desc.path().string()).unwrap_or_else(|| format!("column[{}]", column_i));
-			return Err(format!("Couldn't write data of {}: {}", col_name, error.unwrap()));
-		}
-
-		if !c {
-			return Err("Not enough columns".to_string());
-		}
-
-		Ok(())
-	}
-
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-		debug_assert!(level < self.max_dl);
-
-		// self.column.push(self.default.clone());
-
-		self.dls.push(level);
-		if self.max_rl > 0 {
-			// let self_ri = self.repetition_index.clone();
-			let rl = self.repetition_index.copy_and_diff(repetition_index);
-			// println!("Appending NULL with RL: {}, {:?} {:?}",  rl, self_ri, repetition_index);
-			self.rls.push(rl);
-			Ok(4)
-		} else {
-			Ok(2)
-		}
-	}
-
-	fn max_dl(&self) -> i16 { self.max_dl }
-	fn max_rl(&self) -> i16 { self.max_rl }
-}
-
-fn get_column_descriptor(column: &mut SerializedColumnWriter) -> (Arc<ColumnDescriptor>, u64, u64) {
-	match column.untyped() {
-		ColumnWriter::BoolColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
-		ColumnWriter::Int32ColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
-		ColumnWriter::Int64ColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
-		ColumnWriter::Int96ColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
-		ColumnWriter::FloatColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
-		ColumnWriter::DoubleColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
-		ColumnWriter::ByteArrayColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
-		ColumnWriter::FixedLenByteArrayColumnWriter(x) => (x.get_descriptor().clone(), x.get_total_rows_written(), x.get_total_bytes_written()),
-	}
-}
-
-impl<TPg: Clone, TPq, FConversion> ColumnAppender<TPg> for GenericColumnAppender<TPg, TPq, FConversion>
-	where TPq::T: Clone + RealMemorySize, TPq: DataType, FConversion: Fn(TPg) -> TPq::T {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, value: Cow<TPg>) -> Result<usize, String> {
-		let pq_value = self.convert(value.into_owned());
+impl<TPg, TPq, FConversion> ColumnAppender<TPg> for PrimitiveColumnAppender<TPg, TPq, FConversion>
+	where
+		TPq: PrimitiveParquetType,
+		TPq::T: RealMemorySize,
+		FConversion: Fn(&TPg) -> TPq::T,
+{
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		let pq_value = self.convert(value);
 		let byte_size = pq_value.real_memory_size();
-		self.column.push(pq_value);
-		if self.max_dl > 0 {
-			self.dls.push(self.max_dl);
-		}
-		if self.max_rl > 0 {
-			// let self_ri = self.repetition_index.clone();
-			let rl = self.repetition_index.copy_and_diff(repetition_index);
+		self.builder.extend([Some(pq_value)]);
+		Ok(byte_size + TPq::VALUE_OVERHEAD)
+	}
+}
 
-			// println!("Appending {:?} with RL: {}, {:?} {:?}", self.column.last().unwrap(),  rl, self_ri, repetition_index);
-			self.rls.push(rl);
+pub struct ByteArrayColumnAppender<TPg: ?Sized, FConversion>
+	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
+{
+	builder: BinaryBuilder,
+
+	conversion: FConversion,
+	_pg: PhantomData<TPg>,
+}
+
+impl<TPg: ?Sized, FConversion> ByteArrayColumnAppender<TPg, FConversion>
+	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
+{
+	pub fn new(conversion: FConversion) -> Self {
+		Self {
+			builder: BinaryBuilder::new(),
+
+			conversion,
+			_pg: PhantomData,
 		}
-		Ok(byte_size + (self.max_dl > 0) as usize * 2 + (self.max_rl > 0) as usize * 2)
+	}
+}
+
+impl<TPg: ?Sized, FConversion> ColumnAppenderBase for ByteArrayColumnAppender<TPg, FConversion>
+	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
+{
+	fn write_null(&mut self) -> Result<usize, String> {
+		self.builder.append_null();
+		Ok(4)
+	}
+
+	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
+		let capacity_bytes = next_capacity(self.builder.values_capacity(), self.builder.values_slice().len());
+		// with_capacity takes an item count, excluding the terminal offset
+		//                                                                vvvv
+		let capacity_items = next_capacity(self.builder.offsets_capacity() - 1, self.builder.len());
+		let array = Arc::new(self.builder.finish()) as ArrayRef;
+		self.builder = BinaryBuilder::with_capacity(capacity_items, capacity_bytes);
+		Ok(array)
+	}
+}
+
+impl<TPg: ?Sized, FConversion> ColumnAppender<TPg> for ByteArrayColumnAppender<TPg, FConversion>
+	where FConversion: for <'a> Fn(&'a TPg) -> &'a[u8],
+{
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		let bytes = (self.conversion)(value);
+		let byte_size = bytes.len();
+		self.builder.append_value(bytes);
+		Ok(byte_size + 4)
+	}
+}
+
+pub struct FixedLenBinaryColumnAppender<const N: usize, TPg, FConversion>
+	where FConversion: Fn(&TPg) -> Option<[u8; N]>,
+{
+	builder: FixedSizeBinaryBuilder,
+	conversion: FConversion,
+	_pg: PhantomData<TPg>,
+}
+
+impl<const N: usize, TPg, FConversion> FixedLenBinaryColumnAppender<N, TPg, FConversion>
+	where FConversion: Fn(&TPg) -> Option<[u8; N]>,
+{
+	pub fn new(conversion: FConversion) -> Self {
+		Self {
+			builder: FixedSizeBinaryBuilder::new(N.try_into().unwrap()),
+			conversion,
+			_pg: PhantomData,
+		}
+	}
+}
+
+impl<const N: usize, TPg, FConversion> ColumnAppenderBase for FixedLenBinaryColumnAppender<N, TPg, FConversion>
+	where FConversion: Fn(&TPg) -> Option<[u8; N]>,
+{
+	fn write_null(&mut self) -> Result<usize, String> {
+		self.builder.append_null();
+		Ok(N)
+	}
+
+	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
+		let array = self.builder.finish();
+		let capacity = next_capacity(array.values().capacity() / N, array.len());
+		self.builder = FixedSizeBinaryBuilder::with_capacity(capacity, N.try_into().unwrap());
+		Ok(Arc::new(array))
+	}
+}
+
+impl<const N: usize, TPg, FConversion> ColumnAppender<TPg> for FixedLenBinaryColumnAppender<N, TPg, FConversion>
+	where FConversion: Fn(&TPg) -> Option<[u8; N]>,
+{
+	fn copy_value(&mut self, value: &TPg) -> Result<usize, String> {
+		match (self.conversion)(value) {
+			None => self.builder.append_null(),
+			Some(bytes) => self.builder.append_value(&bytes).unwrap()
+		}
+		Ok(N)
 	}
 }

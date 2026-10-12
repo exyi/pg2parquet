@@ -8,10 +8,10 @@ use postgres_cloner::{SchemaSettingsArrayHandling, SchemaSettingsEnumHandling, S
 
 mod postgresutils;
 mod myfrom;
-mod level_index;
 mod parquetinfo;
 mod playground;
 mod parquet_writer;
+mod arrow_parallel_writer;
 mod postgres_cloner;
 mod pg_custom_types;
 mod datatypes;
@@ -65,6 +65,15 @@ struct ExportArgs {
     /// Avoid printing unnecessary information (schema and progress). Only errors will be written to stderr
     #[arg(long, hide_short_help = true)]
     quiet: bool,
+    /// Number of worker threads. Set to 0 to use all available logical CPUs, or 1 for sequential processing
+    #[arg(long, hide_short_help = true, default_value = "4")]
+    threads: usize,
+    /// Approximate uncompressed byte limit for each Parquet row group
+    #[arg(long, hide_short_help = true, default_value_t = 512 * 1024 * 1024)]
+    row_group_byte_limit: usize,
+    /// Row limit for each Parquet row group. Defaults to the parquet library limit.
+    #[arg(long, hide_short_help = true)]
+    row_group_row_limit: Option<usize>,
     #[command(flatten)]
     postgres: PostgresConnArgs,
     #[command(flatten)]
@@ -85,7 +94,7 @@ enum SslMode {
 pub struct PostgresConnArgs {
     /// PostgreSQL connection URL (postgres://...) or connection string. Mutually exclusive with individual connection parameters.
     /// The connection URL may be also provided using the DATABASE_URL environment variable (recommended if it contains a password)
-    /// See https://docs.rs/postgres/latest/postgres/config/struct.Config.html for a list of supported options
+    /// See https://docs.rs/tokio-postgres/latest/tokio_postgres/config/struct.Config.html for a list of supported options
     #[arg(long="connection", short='c', conflicts_with_all = ["host", "user", "dbname", "port", "password", "sslmode"])]
     connection_string: Option<String>,
 
@@ -258,6 +267,10 @@ fn perform_export(args: ExportArgs) {
         eprintln!("Either query or table must be specified");
         process::exit(1);
     }
+    if args.row_group_byte_limit == 0 || args.row_group_row_limit == Some(0) {
+        eprintln!("Row group limits must be greater than zero");
+        process::exit(2);
+    }
 
     let compression = get_compression(&args).unwrap_or_else(|e| {
         eprintln!("Invalid combination of compression and compression_level: {}", e);
@@ -275,13 +288,15 @@ fn perform_export(args: ExportArgs) {
         _ => 1024 * 128,
     };
 
-    let props =
+    let mut props_builder =
         parquet::file::properties::WriterProperties::builder()
             .set_compression(compression)
             .set_write_batch_size(batch_size)
-            .set_created_by(format!("pg2parquet version {}, using {}", env!("CARGO_PKG_VERSION"), parquet::file::properties::DEFAULT_CREATED_BY))
-        .build();
-    let props = Arc::new(props);
+            .set_created_by(format!("pg2parquet version {}, using {}", env!("CARGO_PKG_VERSION"), parquet::file::properties::DEFAULT_CREATED_BY));
+    if let Some(row_group_row_limit) = args.row_group_row_limit {
+        props_builder = props_builder.set_max_row_group_row_count(Some(row_group_row_limit));
+    }
+    let props = Arc::new(props_builder.build());
 
     let settings = SchemaSettings {
         macaddr_handling: args.schema_settings.macaddr_handling,
@@ -297,7 +312,12 @@ fn perform_export(args: ExportArgs) {
     let query = args.query.unwrap_or_else(|| {
         format!("SELECT * FROM {}", args.table.unwrap())
     });
-    let result = postgres_cloner::execute_copy(&args.postgres, &query, &args.output_file, props, args.quiet, &settings);
+
+    let result = postgres_cloner::execute_copy(
+        args.postgres, query, args.output_file, props, args.quiet, settings, args.threads,
+        args.row_group_byte_limit,
+    );
+
     let _stats = handle_result(result);
 
     // eprintln!("Wrote {} rows, {} bytes of raw data in {} groups", stats.rows, stats.bytes, stats.groups);
@@ -305,7 +325,7 @@ fn perform_export(args: ExportArgs) {
 
 fn parse_args() -> CliCommand {
     let args = CliCommand::parse();
-    
+
     // Validate connection arguments for Export command
     if let CliCommand::Export(ref export_args) = args {
         if let Err(err) = export_args.postgres.validate() {
@@ -313,7 +333,7 @@ fn parse_args() -> CliCommand {
             process::exit(2);
         }
     }
-    
+
     args
 }
 

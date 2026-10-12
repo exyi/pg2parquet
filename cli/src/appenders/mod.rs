@@ -1,10 +1,10 @@
 pub use interface::*;
-pub use generic::{GenericColumnAppender, new_autoconv_generic_appender};
+pub use generic::*;
 pub use array::ArrayColumnAppender;
 pub use real_memory_size::RealMemorySize;
-pub use pg_column::BasicPgRowColumnAppender;
+pub use pg_column::{BasicPgRowColumnAppender, BorrowedPgRowColumnAppender, PgBorrowRef, PgBorrowHelper};
 pub use merged::{DynamicMergedAppender, StaticMergedAppender, new_static_merged_appender};
-pub use helpers::{UnwrapOptionAppender, PreprocessAppender, PreprocessExt, RcWrapperAppender};
+pub use helpers::{PreprocessAppender, PreprocessExt, PreprocessRefAppender, UnwrapOptionAppender};
 
 mod interface;
 mod generic;
@@ -13,4 +13,7 @@ mod array;
 mod pg_column;
 mod merged;
 mod helpers;
-pub mod byte_array;
+pub mod dictionary;
+
+#[cfg(test)]
+mod tests;

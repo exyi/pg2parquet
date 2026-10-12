@@ -1,149 +1,154 @@
-use std::{sync::Arc, borrow::Cow, marker::PhantomData};
-
-use crate::{level_index::LevelIndexList, myfrom::MyFrom};
-
-use super::{ColumnAppenderBase, ColumnAppender, DynamicSerializedWriter, PreprocessExt, PreprocessAppender, new_autoconv_generic_appender, RealMemorySize, GenericColumnAppender, DynColumnAppender};
+use std::{sync::Arc, marker::PhantomData};
+use super::{ColumnAppenderBase, ColumnAppender, DynColumnAppender};
+use arrow::array::{Array, ArrayRef, NullBufferBuilder, StructArray};
+use arrow::datatypes::{Field, Fields};
 
 pub struct DynamicMergedAppender<T> {
 	columns: Vec<DynColumnAppender<T>>,
-	max_dl: i16,
-	max_rl: i16
+	// Child names and nullability are fixed at construction; types come from their builders.
+	fields: Vec<(String, bool)>,
+
+	// Track parent-level presence per row so we can set Struct nulls correctly in Arrow
+	present: NullBufferBuilder,
 }
 
 impl<T> DynamicMergedAppender<T> {
-	pub fn new(columns: Vec<DynColumnAppender<T>>, max_dl: i16, max_rl: i16) -> Self {
-		DynamicMergedAppender { columns, max_dl, max_rl }
+	pub fn new(columns: Vec<DynColumnAppender<T>>, fields: Vec<(String, bool)>) -> Self {
+		assert_eq!(columns.len(), fields.len());
+		DynamicMergedAppender { columns, fields, present: NullBufferBuilder::new(1024) }
 	}
 }
 
 impl<T> ColumnAppenderBase for DynamicMergedAppender<T> {
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
+	fn write_null(&mut self) -> Result<usize, String> {
+		self.present.append_null();
+		let mut total = 0;
+		for x in &mut self.columns {
+		    total += x.write_null()?;
+		}
+		Ok(total.max(1))
+	}
+
+	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
+		let rows = self.present.len();
+		let mut child_arrays = Vec::with_capacity(self.columns.len());
+		let mut fields = Vec::with_capacity(self.columns.len());
+		for (col, (name, nullable)) in self.columns.iter_mut().zip(&self.fields) {
+			let arr = col.to_arrow_array()?;
+			fields.push(Field::new(name, arr.data_type().clone(), *nullable));
+			child_arrays.push(arr);
+		}
+		let validity = self.present.finish();
+
+		let arrow_fields = fields.into();
+		let sa = StructArray::try_new_with_length(arrow_fields, child_arrays, validity, rows)
+			.map_err(|e| format!("Failed to create StructArray: {e}"))?;
+		Ok(Arc::new(sa) as ArrayRef)
+	}
+}
+
+impl<T> ColumnAppender<T> for DynamicMergedAppender<T> {
+	fn copy_value(&mut self, reader: &T) -> Result<usize, String> {
+		// Record a non-null struct row
+		self.present.append_non_null();
 		let mut total = 0;
 		for c in self.columns.iter_mut() {
-			total += c.write_null(repetition_index, level)?;
+			total += c.copy_value(reader)?;
 		}
-		Ok(total)
-	}
-
-	fn write_columns<'b>(&mut self, _column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		for (i, c) in self.columns.iter_mut().enumerate() {
-			c.write_columns(i, next_col)?;
-		}
-		Ok(())
-	}
-
-	fn max_dl(&self) -> i16 {
-		self.max_dl
-	}
-
-	fn max_rl(&self) -> i16 {
-		self.max_rl
+		Ok(total.max(1))
 	}
 }
 
-impl<T: Clone> ColumnAppender<T> for DynamicMergedAppender<T> {
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<T>) -> Result<usize, String> {
-		let mut total = 0;
-		let reader_r = reader.as_ref();
-		for c in self.columns.iter_mut() {
-			total += c.copy_value(repetition_index, Cow::Borrowed(reader_r))?;
-		}
-		Ok(total)
-	}
+pub fn new_static_merged_appender<T>() -> impl StaticMergedAppender<T> {
+    StaticMergedAppenderNil { null_buffer: NullBufferBuilder::new(1024) }
 }
 
-pub fn new_static_merged_appender<T: Clone>(max_dl: i16, max_rl: i16) -> impl StaticMergedAppender<T> {
-    StaticMergedAppenderNil { max_dl, max_rl }
-}
+pub trait StaticMergedAppender<T>: ColumnAppender<T> {
+    fn to_struct_array(&mut self) -> Result<StructArray, String>;
 
-pub trait StaticMergedAppender<T: Clone>: ColumnAppender<T> {
-    fn add_appender<A: ColumnAppender<T>>(self, appender: A) -> StaticMergedAppenderImpl<T, A, Self>
+    fn add_appender<A: ColumnAppender<T>>(self, name: impl Into<String>, nullable: bool, appender: A) -> StaticMergedAppenderImpl<T, A, Self>
         where Self: Sized {
-        StaticMergedAppenderImpl { appender, next: self, _dummy: PhantomData }
+        StaticMergedAppenderImpl { appender, next: self, name: name.into(), nullable, _dummy: PhantomData }
     }
-    fn add_appender_map<A: ColumnAppender<T2>, T2: Clone, F: Fn(Cow<T>) -> Cow<T2>>(self, appender: A, f: F) -> StaticMergedAppenderImpl<T, PreprocessAppender<T, T2, A, F>, Self>
-        where Self: Sized {
-        StaticMergedAppender::add_appender(self, appender.preprocess(f))
-    }
-
-    // fn add_primitive_column<TPq: parquet::data_type::DataType, T2: Clone, F: Fn(Cow<T>) -> Cow<T2>>(self, max_dl: i16, max_rl: i16, f: F) -> StaticMergedAppenderImpl<T, PreprocessAppender<T, T2, GenericColumnAppender<T2, TPq, impl Fn(TPg) -> TPq::T>, F>, Self>
-    //     where Self: Sized,
-    //           TPq::T : MyFrom<T2> + RealMemorySize {
-    //     let appender = new_autoconv_generic_appender::<T2, TPq>(max_dl, max_rl);
-    //     StaticMergedAppender::add_appender_map(self, appender, f)
-    // }
 }
 
-pub struct StaticMergedAppenderImpl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> {
+pub struct StaticMergedAppenderImpl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> {
+    name: String,
+    nullable: bool,
     pub appender: TAppender,
     pub next: Next,
     pub _dummy: PhantomData<T>
 }
 
-impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> ColumnAppenderBase for StaticMergedAppenderImpl<T, TAppender, Next> {
-    fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-        let x = self.next.write_null(repetition_index, level)?;
-        let y = self.appender.write_null(repetition_index, level)?;
-        Ok(x + y)
+impl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> ColumnAppenderBase for StaticMergedAppenderImpl<T, TAppender, Next> {
+	fn write_null(&mut self) -> Result<usize, String> {
+		let x = self.next.write_null()?;
+		let y = self.appender.write_null()?;
+		Ok((x + y).max(1))
     }
 
-    fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-        self.next.write_columns(column_i, next_col)?;
-        self.appender.write_columns(column_i, next_col)?;
-        Ok(())
-    }
-
-    fn max_dl(&self) -> i16 {
-        self.next.max_dl()
-    }
-
-    fn max_rl(&self) -> i16 {
-        self.next.max_rl()
+    fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
+	Ok(Arc::new(StaticMergedAppender::to_struct_array(self)?))
     }
 }
 
-impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> ColumnAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
-    fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<T>) -> Result<usize, String> {
-        let x = self.next.copy_value(repetition_index, Cow::Borrowed(reader.as_ref()))?;
-        let y = self.appender.copy_value(repetition_index, reader)?;
-        Ok(x + y)
+impl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> ColumnAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
+    fn copy_value(&mut self, reader: &T) -> Result<usize, String> {
+		let x = self.next.copy_value(reader)?;
+        let y = self.appender.copy_value(reader)?;
+		Ok((x + y).max(1))
     }
 }
 
-impl<T: Clone, TAppender: ColumnAppender<T>, Next: ColumnAppender<T>> StaticMergedAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {}
+impl<T, TAppender: ColumnAppender<T>, Next: StaticMergedAppender<T>> StaticMergedAppender<T> for StaticMergedAppenderImpl<T, TAppender, Next> {
+    fn to_struct_array(&mut self) -> Result<StructArray, String> {
+	let next_struct = self.next.to_struct_array()?;
+	let len = next_struct.len();
+	let (fields, mut arrays, nulls) = next_struct.into_parts();
+	let mut fields = fields.to_vec();
+        let array = self.appender.to_arrow_array()?;
+	fields.push(Arc::new(Field::new(&self.name, array.data_type().clone(), self.nullable)));
+	arrays.push(array);
+	Ok(StructArray::try_new_with_length(
+		fields.into(),
+		arrays,
+		nulls,
+		len).unwrap())
+    }
+}
 
 pub struct StaticMergedAppenderNil {
-    pub max_dl: i16,
-    pub max_rl: i16
+    pub null_buffer: NullBufferBuilder
+}
+
+impl StaticMergedAppenderNil {
+    fn to_struct_array(&mut self) -> StructArray {
+	let len = self.null_buffer.len();
+	let nulls = self.null_buffer.finish();
+        StructArray::try_new_with_length(Fields::empty(), vec![], nulls, len).unwrap()
+    }
+}
+
+impl<T> StaticMergedAppender<T> for StaticMergedAppenderNil {
+    fn to_struct_array(&mut self) -> Result<StructArray, String> {
+	Ok(self.to_struct_array())
+    }
 }
 
 impl ColumnAppenderBase for StaticMergedAppenderNil {
-    fn write_null(&mut self, _repetition_index: &LevelIndexList, _level: i16) -> Result<usize, String> {
-        Ok(0)
+    fn write_null(&mut self) -> Result<usize, String> {
+	self.null_buffer.append_null();
+        Ok(1)
     }
 
-    fn write_columns<'b>(&mut self, _column_i: usize, _next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn max_dl(&self) -> i16 { self.max_dl }
-
-    fn max_rl(&self) -> i16 { self.max_rl }
-}
-
-impl<T: Clone> ColumnAppender<T> for StaticMergedAppenderNil {
-    fn copy_value(&mut self, _repetition_index: &LevelIndexList, _reader: Cow<T>) -> Result<usize, String> {
-        Ok(0)
+    fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
+	Ok(Arc::new(self.to_struct_array()))
     }
 }
 
-impl<T: Clone> StaticMergedAppender<T> for StaticMergedAppenderNil {}
-
-
-// trait StaticMergedAppenderCore<T> {
-//     fn copy_value(&mut self, repetition_index: &LevelIndexList, reader: Cow<Arc<T>>) -> Result<usize, String>;
-//     fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String>;
-//     fn write_columns<'b>(&mut self, _column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String>;
-// }
-
-// struct StaticMergedAppenderCoreImpl<T, TNext: 
+impl<T> ColumnAppender<T> for StaticMergedAppenderNil {
+	fn copy_value(&mut self, _reader: &T) -> Result<usize, String> {
+	self.null_buffer.append_non_null();
+		Ok(1)
+    }
+}

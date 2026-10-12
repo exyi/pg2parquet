@@ -1,6 +1,9 @@
 pub mod numeric;
 pub mod money;
+pub mod network;
 pub mod jsonb;
+pub mod xml;
 pub mod interval;
 pub mod array;
 pub mod pgvector;
+pub mod raw_bytes;

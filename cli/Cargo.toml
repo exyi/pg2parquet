@@ -14,13 +14,17 @@ default = []
 manpage_gen = [ "dep:clap_mangen", "dep:clap_complete_nushell", "dep:clap_complete" ]
 
 [dependencies]
-parquet = { version = "54.2.1", default-features = false, features = ["zstd", "lz4", "flate2", "brotli", "snap", "base64"] }
-postgres = { version = "0.19.9", features = ["with-chrono-0_4", "with-serde_json-1", "with-bit-vec-0_6", "with-uuid-1", "with-geo-types-0_7", "with-eui48-1"] }
+parquet = { version = "59.3.0", default-features = false, features = ["zstd", "lz4", "flate2", "flate2-rust_backend", "brotli", "snap", "base64", "arrow"] }
+arrow = "59.3.0"
+serde_json = "1.0.128"
+postgres = { package = "tokio-postgres", version = "0.7.18", features = ["with-chrono-0_4", "with-serde_json-1", "with-bit-vec-0_6", "with-uuid-1", "with-geo-types-0_7", "with-eui48-1"] }
+fallible-iterator = "0.2"
+futures-util = "0.3"
 pgvector = { version = "0.4", features = ["postgres", "halfvec"] }
 half = { version = "2.4.1" }
-clap = { version = "4.0.10", features = ["derive"] }
-uuid = "1.4.1"
-chrono = "0.4.26"
+uuid = "1.18.0"
+chrono = "0.4.41"
+clap = { version = "4.5.45", features = ["derive"] }
 eui48 = "1.1.0"
 bit-vec = "0.6.3"
 pg_bigdecimal = "0.1.5"
@@ -29,8 +33,10 @@ bytes = "1.11.1"
 postgres-protocol = "0.6.7"
 byteorder = "1.5.0"
 rpassword = "7.5.3"
+tokio = { version = "1.0", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+
 # optional:
-clap_mangen = { version = "0.2.29", optional = true }
+clap_mangen = { version = "0.3.3", optional = true }
 clap_complete = { version = "4.5.58", optional = true }
 clap_complete_nushell = { version = "4.5.8", optional = true }
 
@@ -52,9 +58,3 @@ inherits = "release"
 codegen-units = 1
 lto = true
 # strip = true
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-
-[target.armv7-unknown-linux-gnueabihf]
-linker = "arm-linux-gnueabihf-gcc"

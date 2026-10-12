@@ -1,116 +1,97 @@
-use std::{marker::PhantomData, borrow::Cow};
+use std::marker::PhantomData;
 
-use crate::level_index::LevelIndexList;
+use super::{ColumnAppender, ColumnAppenderBase};
+// Arrow support for exporting LIST arrays via inner appender
+use std::sync::Arc;
+use arrow::array::{ArrayRef, ListArray, NullBufferBuilder, OffsetBufferBuilder};
+use arrow::datatypes::Field as ArrowField;
+use arrow::buffer::{OffsetBuffer, NullBuffer};
 
-use super::{ColumnAppender, ColumnAppenderBase, DynamicSerializedWriter};
-
-pub struct ArrayColumnAppender<TPg: Clone, TInner>
+pub struct ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
 	inner: TInner,
-	dl: i16,
-	rl: i16,
+	element_name: String,
 	allow_null: bool,
 	allow_element_null: bool,
+	// Track per-list metadata using Arrow builders
+	offsets_builder: OffsetBufferBuilder<i32>,
+	valid_builder: NullBufferBuilder,
 	_dummy: PhantomData<TPg>,
-	// dummy2: PhantomData<TPg>,
 }
 
-impl<TPg: Clone, TInner> ArrayColumnAppender<TPg, TInner>
+impl<TPg, TInner> ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
-	pub fn new(inner: TInner, allow_null: bool, allow_element_null: bool, dl: i16, rl: i16) -> Self {
-		if inner.max_rl() != rl + 1 {
-			panic!("Cannot create {}, repetition levels {} must be one less than inner repetition levels {}", std::any::type_name::<Self>(), rl, inner.max_rl());
+	pub fn new(inner: TInner, allow_null: bool, allow_element_null: bool) -> Self {
+		ArrayColumnAppender {
+			inner, allow_null, allow_element_null, element_name: "element".into(),
+			offsets_builder: OffsetBufferBuilder::new(1024),
+			valid_builder: NullBufferBuilder::new(1024),
+			_dummy: PhantomData
 		}
-		if inner.max_dl() != dl + 1 + allow_element_null as i16 {
-			panic!("Cannot create {}, definition levels {} must be {} less than inner definition levels {}", std::any::type_name::<Self>(), dl, 1 + allow_element_null as i16, inner.max_dl());
-		}
-		if dl < allow_null as i16 {
-			panic!("Cannot create {}, definition levels {} must be positive", std::any::type_name::<Self>(), dl);
-		}
-		if rl < 0 {
-			panic!("Cannot create {}, repetition levels {} must be positive", std::any::type_name::<Self>(), rl);
-		}
-
-		ArrayColumnAppender { inner, allow_null, allow_element_null, dl, rl, _dummy: PhantomData }
+	}
+	pub fn with_element_name(mut self, name: impl Into<String>) -> Self {
+		self.element_name = name.into();
+		self
 	}
 }
 
-impl<TPg: Clone, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner> 
+impl<TPg, TInner> ColumnAppenderBase for ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg> {
-	fn write_null(&mut self, repetition_index: &LevelIndexList, level: i16) -> Result<usize, String> {
-		assert!(level <= self.dl);
-
-		let nested_ri = repetition_index.new_child();
-		self.inner.write_null(&nested_ri, level)
+	fn write_null(&mut self) -> Result<usize, String> {
+		self.offsets_builder.push_length(0);
+		self.valid_builder.append_null();
+		Ok(4)
 	}
 
-	fn max_dl(&self) -> i16 { self.dl }
-	fn max_rl(&self) -> i16 {
-		debug_assert!(self.inner.max_rl() > 0);
-		self.inner.max_rl() - 1
-	}
+	fn to_arrow_array(&mut self) -> Result<ArrayRef, String> {
+		let child_arr = self.inner.to_arrow_array()?;
+		let child_field_ref = Arc::new(ArrowField::new(&self.element_name, child_arr.data_type().clone(), self.allow_element_null));
+		let list_nulls: Option<NullBuffer> = if self.allow_null {
+			std::mem::replace(&mut self.valid_builder, NullBufferBuilder::new(65536)).finish()
+		} else { None };
+		let offsets_buf: OffsetBuffer<i32> = std::mem::replace(&mut self.offsets_builder, OffsetBufferBuilder::new(65536)).finish();
+		let list = ListArray::try_new(child_field_ref.clone(), offsets_buf, child_arr, list_nulls)
+			.map_err(|e| format!("ListArray::try_new({child_field_ref:?}) failed: {}", e.to_string()))?;
 
-	fn write_columns<'b>(&mut self, column_i: usize, next_col: &mut dyn DynamicSerializedWriter) -> Result<(), String> {
-		self.inner.write_columns(column_i, next_col)
-	}	
+		Ok(Arc::new(list) as ArrayRef)
+	}
 }
 
 pub trait Nullable<T> {
-	const IS_NULLABLE: bool;
-	fn as_option(self) -> Option<T>;
+	fn as_option(&self) -> Option<&T>;
 }
 
 impl<T> Nullable<T> for Option<T> {
-	const IS_NULLABLE: bool = true;
-	fn as_option(self) -> Option<T> { self }
+	fn as_option(&self) -> Option<&T> { self.as_ref() }
 }
 
 impl<T> Nullable<T> for T {
-	const IS_NULLABLE: bool = false;
-	fn as_option(self) -> Option<T> { Some(self) }
+	fn as_option(&self) -> Option<&T> { Some(self) }
 }
 
-impl<'a, TPg: Clone, TInner, TArray: Clone, TItem> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
+impl<TPg, TInner, TArray, TItem> ColumnAppender<TArray> for ArrayColumnAppender<TPg, TInner>
 	where TInner: ColumnAppender<TPg>,
-		  TArray: IntoIterator<Item = TItem> + Clone,
+		  for<'a> &'a TArray: IntoIterator<Item = &'a TItem>,
 		  TItem: Nullable<TPg> {
-
-	fn copy_value(&mut self, repetition_index: &LevelIndexList, array: Cow<TArray>) -> Result<usize, String> {
+	fn copy_value(&mut self, array: &TArray) -> Result<usize, String> {
 		let mut bytes_written = 0;
 
-		let mut nested_ri = repetition_index.new_child();
+		let mut element_count = 0;
 
-		for (_index, value) in array.into_owned().into_iter().enumerate() {
-			if TItem::IS_NULLABLE && self.allow_element_null {
-				bytes_written += self.inner.copy_value_opt(&nested_ri, Cow::Owned(value.as_option()))?;
-				nested_ri.inc();
-			} else {
-				match value.as_option() {
-					Some(value) => {
-						bytes_written += self.inner.copy_value(&nested_ri, Cow::Owned(value))?;
-						nested_ri.inc();
-					},
-					None => { }// skip
+		for value in array {
+			match value.as_option() {
+				Some(value) => bytes_written += self.inner.copy_value(value)?,
+				None if self.allow_element_null => bytes_written += self.inner.write_null()?,
+				None => {
+					debug_assert!(false, "null element in a required list");
+					continue;
 				}
 			}
+			element_count += 1;
 		}
 
-		if nested_ri.index == 0 {
-			// empty array is written as null at DL=1
-			bytes_written += self.inner.write_null(&nested_ri, self.dl)?;
-		}
-		Ok(bytes_written)
-	}
-
-	fn copy_value_opt(&mut self, repetition_index: &LevelIndexList, value: Cow<Option<TArray>>) -> Result<usize, String> {
-		match value {
-			Cow::Owned(Some(value)) => self.copy_value(repetition_index, Cow::<TArray>::Owned(value)),
-			Cow::Borrowed(Some(value)) => self.copy_value(repetition_index, Cow::Borrowed(value)),
-			Cow::Owned(None) | Cow::Borrowed(None) => {
-				// if !self.allow_null, this writes an empty array
-				let nested_ri = repetition_index.new_child();
-				self.inner.write_null(&nested_ri, self.dl - self.allow_null as i16)
-			},
-		}
+		self.offsets_builder.push_length(element_count);
+		self.valid_builder.append_non_null();
+		Ok(bytes_written + 4)
 	}
 }

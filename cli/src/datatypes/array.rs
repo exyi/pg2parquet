@@ -1,7 +1,8 @@
 use std::vec;
 
 use parquet::data_type::ByteArray;
-use postgres::{fallible_iterator::FallibleIterator, types::{FromSql, Kind, Type}};
+use fallible_iterator::FallibleIterator;
+use postgres::types::{FromSql, Kind, Type};
 use postgres_protocol::types::array_from_sql;
 
 use crate::myfrom::MyFrom;

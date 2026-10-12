@@ -16,7 +16,7 @@ fn print_col_info<T: DataType<T = T2>, T2: Default + Clone + ParquetTypeFormat>(
 	let mut rls = vec![];
 	let (record_count, valuecount, totalcount) = reader.read_records(batch_size, Some(&mut dls), Some(&mut rls), &mut data).unwrap();
 
-	let data_display = DisplayDataRow { vec: data, lt: col.logical_type(), ct: col.converted_type() };
+	let data_display = DisplayDataRow { vec: data, lt: col.logical_type_ref().cloned(), ct: col.converted_type() };
 	println!("record_count={record_count} valuecount={valuecount} totalcount={totalcount} values={data_display}");
 
 	if dls.iter().any(|x| *x != 0) {
@@ -35,8 +35,6 @@ pub fn print_parquet_info(_path: &std::path::PathBuf) {
 #[cfg(debug_assertions)]
 pub fn print_parquet_info(path: &std::path::PathBuf) {
     use std::io::stdout;
-
-    use parquet::schema::types::to_thrift;
 
 	let file = std::fs::File::open(path).unwrap();
 	let reader = SerializedFileReader::new(file).unwrap();
